@@ -1,0 +1,19 @@
+# systemd user unit: keeps the proxy running and tests servers in background.
+# Install:  cp contrib/v2rayn-tui.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now v2rayn-tui
+# The TUI (`v2rayn-tui`) offers to stop the service when you open it;
+# start it again with `systemctl --user start v2rayn-tui` or "Quit → Background" in the TUI.
+[Unit]
+Description=v2rayN TUI daemon (xray / sing-box proxy + background server tests)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/v2rayn-tui daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

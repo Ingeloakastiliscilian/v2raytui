@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/external/" />
+  <Folder Name="/external/v2rayN/" />
+  <Folder Name="/external/v2rayN/v2rayN/">
+    <Project Path="external/v2rayN/v2rayN/ServiceLib.UdpTest/ServiceLib.UdpTest.csproj" />
+    <Project Path="external/v2rayN/v2rayN/ServiceLib/ServiceLib.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/V2RayTui/V2RayTui.csproj" />
+  </Folder>
+</Solution>
