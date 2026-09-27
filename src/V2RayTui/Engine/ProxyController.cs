@@ -57,12 +57,16 @@ public sealed class ProxyController
             // TUN is wanted (saved setting) but sudo is not available in this session: start without it,
             // keeping the setting, so the next start with a password brings TUN back.
             var tunWanted = Config.TunModeItem.EnableTun;
-            var tunSuppressed = tunWanted && !TunAllowed;
+            var foreignTun = tunWanted && ForeignTunPresent();
+            var tunSuppressed = tunWanted && (!TunAllowed || foreignTun);
             if (tunSuppressed)
             {
                 Config.TunModeItem.EnableTun = false;
-                LogBus.Notice(Loc.T("TUN is on but no sudo access in this session — starting without TUN",
-                    "TUN включён, но в этом сеансе нет доступа sudo — запуск без TUN"));
+                LogBus.Notice(foreignTun
+                    ? Loc.T("TUN interface singbox_tun is already up in another application (v2rayN GUI?) — close it or turn its TUN off; starting without TUN",
+                        "TUN-интерфейс singbox_tun уже поднят другим приложением (GUI v2rayN?) — закройте его или выключите там TUN; запуск без TUN")
+                    : Loc.T("TUN is on but no sudo access in this session — starting without TUN",
+                        "TUN включён, но в этом сеансе нет доступа sudo — запуск без TUN"));
             }
             CoreConfigContextBuilderAllResult all;
             try
@@ -471,6 +475,13 @@ public sealed class ProxyController
     }
 
     public static bool TunAllowed => Utils.IsWindows() ? Utils.IsAdministrator() : AppManager.Instance.LinuxSudoPwd.IsNotEmpty();
+
+    /// <summary>
+    /// v2rayN always names its TUN interface singbox_tun (and uses route table 2022): if it exists while
+    /// our TUN is not running, another app (usually v2rayN GUI) owns it and a second TUN would break routing.
+    /// </summary>
+    public bool ForeignTunPresent() =>
+        OperatingSystem.IsLinux() && Directory.Exists("/sys/class/net/singbox_tun") && !(TunActive && CoreRunning);
 
     /// <summary>TUN is part of the running configuration.</summary>
     public bool TunActive { get; private set; }
