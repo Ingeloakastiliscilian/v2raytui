@@ -14,9 +14,14 @@ public static class CliApp
         {
             Loc.IsRu = lang.StartsWith("ru", StringComparison.OrdinalIgnoreCase);
         }
-        AppHost.PrepareEnvironment(args.Has("--portable"));
+        AppHost.PrepareEnvironment(args.Has("--portable"), args.Get("--data") ?? Environment.GetEnvironmentVariable("V2RAYN_TUI_DATA"));
 
         var cmd = args.Pos(0)?.ToLowerInvariant() ?? "tui";
+        if (args.Has("--version") || cmd is "version")
+        {
+            Console.WriteLine($"v2rayn-tui {AppHost.Version} (v2rayN engine {Utils.GetVersionInfo()})");
+            return 0;
+        }
         if (args.Has("--help") || cmd is "help")
         {
             PrintHelp();
@@ -30,6 +35,7 @@ public static class CliApp
                 "tui" => await RunTuiAsync(args),
                 "daemon" => await Daemon.RunAsync(args),
                 "stop" => await StopAsync(),
+                "import-data" => ImportData(args),
                 "status" => Status(),
                 "test" => await WithEngine("cli", () => TestAsync(args)),
                 "list" or "ls" => await WithEngine("cli", () => ListAsync(args)),
@@ -72,13 +78,14 @@ public static class CliApp
 """
 v2rayn-tui — terminal UI for the v2rayN engine (xray / sing-box)
 
-Usage: v2rayn-tui [--portable] [--lang en|ru] [command]
+Usage: v2rayn-tui [--data DIR | --portable] [--lang en|ru] [command]
 
   (no command) | tui            interactive TUI
   daemon [--log FILE] [--no-core] [--test-now]
                                 headless mode: keeps the proxy running, updates
                                 subscriptions and tests servers in background
   stop                          stop the running daemon / TUI
+  import-data DIR [--force]     copy data (subscriptions, servers, cores) from another data dir
   status                        show data dir, owner process, cores
 
   list [-s SUB]                 list servers with last results
@@ -97,18 +104,20 @@ Usage: v2rayn-tui [--portable] [--lang en|ru] [command]
   geo update [--proxy]
 
 SUB is a subscription id, its name or its number from `sub list`.
-Data dir: ~/.local/share/v2rayN (shared with v2rayN desktop); --portable = next to the binary.
+Data: ~/.local/share/v2rayN (shared with v2rayN desktop); --data DIR (or V2RAYN_TUI_DATA) = DIR/v2rayN;
+--portable = next to the binary.
 """,
 """
 v2rayn-tui — терминальный интерфейс к движку v2rayN (xray / sing-box)
 
-Использование: v2rayn-tui [--portable] [--lang en|ru] [команда]
+Использование: v2rayn-tui [--data КАТАЛОГ | --portable] [--lang en|ru] [команда]
 
   (без команды) | tui           интерактивный TUI
   daemon [--log ФАЙЛ] [--no-core] [--test-now]
                                 фоновый режим: держит прокси, обновляет подписки
                                 и тестирует серверы по расписанию
   stop                          остановить запущенный daemon / TUI
+  import-data КАТАЛОГ [--force] перенести данные (подписки, серверы, ядра) из другого каталога
   status                        каталог данных, процесс-владелец, ядра
 
   list [-s ПОДП]                список серверов с последними результатами
@@ -127,7 +136,8 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
   geo update [--proxy]
 
 ПОДП — id подписки, её имя или номер из `sub list`.
-Данные: ~/.local/share/v2rayN (общие с v2rayN desktop); --portable — рядом с бинарником.
+Данные: ~/.local/share/v2rayN (общие с v2rayN desktop); --data КАТАЛОГ (или V2RAYN_TUI_DATA) — КАТАЛОГ/v2rayN;
+--portable — рядом с бинарником.
 """));
     }
 
@@ -173,9 +183,75 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
             if (result == Tui.TuiExit.Detach)
             {
                 lk.Dispose();
-                return Daemon.SpawnDetached(args.Has("--portable"));
+                return Daemon.SpawnDetached();
             }
         }
+        return 0;
+    }
+
+    /// <summary>Copies another data directory (e.g. a --portable one) into the current one.</summary>
+    private static int ImportData(ArgList args)
+    {
+        var from = args.Pos(1) ?? throw new ArgumentException(L("Specify the directory that contains guiConfigs", "Укажите каталог, в котором лежит guiConfigs"));
+        from = Path.GetFullPath(from);
+        if (File.Exists(Path.Combine(from, "v2rayN", "guiConfigs", "guiNDB.db")))
+        {
+            from = Path.Combine(from, "v2rayN");
+        }
+        var srcConfigs = Path.Combine(from, "guiConfigs");
+        if (!File.Exists(Path.Combine(srcConfigs, "guiNDB.db")))
+        {
+            Console.Error.WriteLine(L($"No v2rayN data in {from}", $"В {from} нет данных v2rayN"));
+            return 1;
+        }
+        if (File.Exists(Path.Combine(srcConfigs, "tui.pid")) && int.TryParse(File.ReadLines(Path.Combine(srcConfigs, "tui.pid")).FirstOrDefault(), out var pid) && InstanceLock.IsAlive(pid))
+        {
+            Console.Error.WriteLine(L($"The source is in use (pid {pid}): quit that TUI first.", $"Источник используется (pid {pid}): сначала закройте тот TUI."));
+            return 1;
+        }
+        var target = AppHost.DataDir;
+        if (Path.GetFullPath(target).TrimEnd('/') == from.TrimEnd('/'))
+        {
+            Console.Error.WriteLine(L("Source and target are the same directory.", "Источник и цель совпадают."));
+            return 1;
+        }
+        using var lk = InstanceLock.TryAcquire("cli", out var err);
+        if (lk is null)
+        {
+            Console.Error.WriteLine(err);
+            return 1;
+        }
+        if (File.Exists(Path.Combine(target, "guiConfigs", "guiNDB.db")) && !args.Has("--force"))
+        {
+            Console.Error.WriteLine(L($"{target} already has data. Use --force to replace it.", $"В {target} уже есть данные. --force — заменить."));
+            return 1;
+        }
+        var skip = new HashSet<string> { "tui.lock", "tui.pid" };
+        var copied = 0;
+        foreach (var sub in new[] { "guiConfigs", "bin" })
+        {
+            var src = Path.Combine(from, sub);
+            if (!Directory.Exists(src))
+            {
+                continue;
+            }
+            foreach (var file in Directory.EnumerateFiles(src, "*", SearchOption.AllDirectories))
+            {
+                if (skip.Contains(Path.GetFileName(file)))
+                {
+                    continue;
+                }
+                var dst = Path.Combine(target, sub, Path.GetRelativePath(src, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+                File.Copy(file, dst, true);
+                if (!OperatingSystem.IsWindows())
+                {
+                    File.SetUnixFileMode(dst, File.GetUnixFileMode(file));
+                }
+                copied++;
+            }
+        }
+        Console.WriteLine(L($"Copied {copied} files: {from} → {target}", $"Скопировано файлов: {copied}: {from} → {target}"));
         return 0;
     }
 

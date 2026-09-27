@@ -91,28 +91,51 @@ Alive — группа без URL, поэтому обновление подп�
 автообновление v2rayN (интервалы меньше часа поднимаются до 60 мин). Считаются и неудачные попытки.
 Вручную можно обновить принудительно — TUI спросит подтверждение, в CLI — `sub update --force`.
 
-## Сборка и установка
+## Установка
 
-Нужен .NET SDK 10.
+Готовые сборки делает `packaging/build.sh` (нужен .NET SDK 10) — в `dist/` появятся:
+
+| Файл | Что это |
+|---|---|
+| `v2rayn-tui_<ver>_amd64.deb`, `_arm64.deb` | пакет для Debian / Ubuntu: `/usr/bin/v2rayn-tui` + systemd-юнит |
+| `v2rayn-tui-<ver>-linux-x64.tar.gz`, `-linux-arm64` | архив: бинарник, `install.sh`, юнит, документация |
+| `SHA256SUMS` | контрольные суммы |
+
+Бинарник самодостаточный (≈95 МБ): .NET на целевой машине не нужен. Ядра xray / sing-box и geo-файлы
+TUI скачает сам при первом запуске (или `v2rayn-tui core update`).
 
 ```bash
-git clone --recurse-submodules <этот репозиторий>
-cd v2ray
-dotnet build src/V2RayTui                       # отладочная сборка
-dotnet run --project src/V2RayTui               # запуск
+# Debian / Ubuntu
+sudo apt install ./dist/v2rayn-tui_0.2.0_amd64.deb
+systemctl --user enable --now v2rayn-tui          # daemon при входе в систему (по желанию)
 
-# самодостаточный single-file бинарник (≈95 МБ, .NET на целевой машине не нужен)
-dotnet publish src/V2RayTui -c Release -r linux-x64 --self-contained -o publish
-install -m755 publish/v2rayn-tui ~/.local/bin/
+# любой Linux: из архива, без root
+tar xzf v2rayn-tui-0.2.0-linux-x64.tar.gz && cd v2rayn-tui-0.2.0-linux-x64
+./install.sh                     # → ~/.local/bin + systemd-юнит пользователя
+./install.sh --service           # то же + сразу запустить daemon и включить автозапуск
+./install.sh --data ~/.local/share/v2rayn-tui    # daemon с отдельным каталогом данных
+./install.sh --uninstall         # удалить (данные остаются)
 ```
 
-При первом запуске TUI предложит скачать xray, sing-box и geo-файлы (или `v2rayn-tui core update`).
+Сборка для разработки: `dotnet build src/V2RayTui`, запуск: `dotnet run --project src/V2RayTui`.
+Другие платформы: `packaging/build.sh osx-arm64 win-x64` (только архивы).
+
+### Перенос данных
+
+`v2rayn-tui import-data КАТАЛОГ` копирует подписки, серверы, группу Alive, настройки, ядра и geo-файлы
+из другого каталога данных (например, из `--portable`-запуска рядом с бинарником) в текущий:
+
+```bash
+v2rayn-tui --data ~/.local/share/v2rayn-tui import-data ~/src/v2ray/src/V2RayTui/bin/Debug/net10.0
+```
 
 ## Каталог данных и совместимость с v2rayN
 
 По умолчанию данные лежат в `~/.local/share/v2rayN` (или `$XDG_DATA_HOME/v2rayN`) — **там же, где их
 хранит v2rayN desktop на Linux**: подписки, серверы, маршруты и результаты тестов общие.
-`--portable` — хранить данные рядом с бинарником.
+`--portable` — хранить данные рядом с бинарником; `--data КАТАЛОГ` (или переменная `V2RAYN_TUI_DATA`) —
+в `КАТАЛОГ/v2rayN`, например отдельно от GUI v2rayN. Для daemon из `.deb` каталог задаётся через
+`systemctl --user edit v2rayn-tui` (`Environment=V2RAYN_TUI_DATA=…`).
 
 Одновременно с GUI на одном каталоге работать нельзя: TUI откажется запускаться, если видит запущенное
 ядро из этого каталога (именованный mutex v2rayN для этого не годится — в .NET на Linux он привязан к

@@ -13,7 +13,7 @@ public sealed class ArgList
         ["-l"] = "--log",
     };
 
-    private static readonly HashSet<string> _valueOptions = ["--sub", "--mode", "--top", "--log", "--lang", "--name", "--limit", "--interval"];
+    private static readonly HashSet<string> _valueOptions = ["--sub", "--mode", "--top", "--log", "--lang", "--name", "--limit", "--interval", "--data"];
 
     public List<string> Positional { get; } = [];
     private readonly Dictionary<string, string?> _options = new(StringComparer.OrdinalIgnoreCase);

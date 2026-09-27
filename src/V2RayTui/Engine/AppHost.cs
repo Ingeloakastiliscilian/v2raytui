@@ -25,13 +25,43 @@ public static class AppHost
     /// By default data lives in the per-user directory (~/.local/share/v2rayN) — the same place
     /// the packaged v2rayN desktop uses on Linux, so profiles are shared with it.
     /// </summary>
-    public static void PrepareEnvironment(bool portable)
+    /// <summary>Command-line arguments that select the data directory (passed on to a detached daemon).</summary>
+    public static List<string> DataArgs { get; } = [];
+
+    /// <param name="portable">Keep data next to the binary.</param>
+    /// <param name="dataDir">
+    /// Keep data in this directory instead of the per-user one. v2rayN always names its folder "v2rayN",
+    /// so "DIR/v2rayN" is used unless DIR itself is named v2rayN.
+    /// </param>
+    public static void PrepareEnvironment(bool portable, string? dataDir = null)
     {
+        if (dataDir.IsNotEmpty())
+        {
+            if (dataDir.StartsWith("~/"))
+            {
+                dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), dataDir[2..]);
+            }
+            var full = Path.GetFullPath(dataDir).TrimEnd('/');
+            var parent = Path.GetFileName(full) == "v2rayN" ? Path.GetDirectoryName(full)! : full;
+            Directory.CreateDirectory(parent);
+            // .NET resolves LocalApplicationData from XDG_DATA_HOME on Linux.
+            Environment.SetEnvironmentVariable("XDG_DATA_HOME", parent, EnvironmentVariableTarget.Process);
+            DataArgs.AddRange(["--data", full]);
+            portable = false;
+        }
+        else if (portable)
+        {
+            DataArgs.Add("--portable");
+        }
         if (!portable)
         {
             Environment.SetEnvironmentVariable(Global.LocalAppData, "1", EnvironmentVariableTarget.Process);
         }
     }
+
+    public static string Version =>
+        typeof(AppHost).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion.Split('+')[0] ?? "?";
 
     public static string DataDir => Utils.StartupPath();
 

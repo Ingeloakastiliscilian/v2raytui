@@ -96,7 +96,7 @@ public static class Daemon
     }
 
     /// <summary>Starts a detached daemon (used by the TUI's "keep running in background").</summary>
-    public static int SpawnDetached(bool portable)
+    public static int SpawnDetached()
     {
         var exe = Environment.ProcessPath!;
         var log = Utils.GetLogPath("daemon.log");
@@ -107,10 +107,7 @@ public static class Daemon
             daemonArgs.Add(Environment.GetCommandLineArgs()[0]);
         }
         daemonArgs.AddRange(["daemon", "--log", log]);
-        if (portable)
-        {
-            daemonArgs.Add("--portable");
-        }
+        daemonArgs.AddRange(AppHost.DataArgs);
 
         var psi = new ProcessStartInfo
         {
