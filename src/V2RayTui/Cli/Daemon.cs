@@ -61,8 +61,8 @@ public static class Daemon
             }
             if (AppHost.Config.TunModeItem.EnableTun && !await ProxyController.TryPasswordlessSudoAsync())
             {
-                LogBus.Write(Loc.T("TUN is on, but the daemon cannot ask for a sudo password: starting without TUN (see README: unattended TUN).",
-                    "TUN включён, но daemon не может спросить пароль sudo: запуск без TUN (см. README: TUN без пароля)."));
+                LogBus.Write(Loc.T("TUN is on, but the daemon cannot ask for a sudo password: starting without TUN (README: TUN).",
+                    "TUN включён, но daemon не может спросить пароль sudo: запуск без TUN (README, раздел TUN)."));
             }
             if (!args.Has("--no-core"))
             {
