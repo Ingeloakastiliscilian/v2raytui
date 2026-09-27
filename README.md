@@ -133,6 +133,9 @@ tar xzf v2rayn-tui-0.2.0-linux-x64.tar.gz && cd v2rayn-tui-0.2.0-linux-x64
 ./install.sh --uninstall         # удалить (данные остаются)
 ```
 
+Быстрая установка при разработке (без .deb/архива, публикует прямо в `~/.local/bin`):
+`packaging/dev-install.sh` (`--restart` — ещё и перезапустить фоновый процесс новой версией).
+
 Сборка для разработки: `dotnet build src/V2RayTui`, запуск: `dotnet run --project src/V2RayTui`.
 Другие платформы: `packaging/build.sh osx-arm64 win-x64` (только архивы).
 
