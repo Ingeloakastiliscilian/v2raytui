@@ -173,6 +173,7 @@ public sealed class TestService
         Action<string, int, decimal, string?>? onItemFinished = null, int? speedSeconds = null)
     {
         ApplySettings(AppHost.Settings);
+        CleanupStaleTestConfigs();
         var job = new TestJob
         {
             Title = title,
@@ -444,19 +445,53 @@ public sealed class TestService
         await Task.WhenAll(batches.Select(b => RunBatchAsync(job, b.Items, b.Multi, perItem, pending, ct)));
     }
 
+    private static readonly ConcurrentDictionary<string, byte> _rejectedLogged = new();
+    private static DateTime _lastCleanup;
+
+    /// <summary>
+    /// Every test core leaves binConfigs/configTest*.json behind (v2rayN keeps them for debugging):
+    /// thousands per day with background cycles. Files older than an hour are no longer in use.
+    /// </summary>
+    private static void CleanupStaleTestConfigs()
+    {
+        if (DateTime.Now - _lastCleanup < TimeSpan.FromMinutes(10))
+        {
+            return;
+        }
+        _lastCleanup = DateTime.Now;
+        try
+        {
+            var cutoff = DateTime.Now.AddHours(-1);
+            foreach (var f in Directory.EnumerateFiles(Utils.GetBinConfigPath(), "configTest*.json"))
+            {
+                if (File.GetLastWriteTime(f) < cutoff)
+                {
+                    File.Delete(f);
+                }
+            }
+        }
+        catch
+        {
+            // best effort
+        }
+    }
+
     private async Task RunBatchAsync(TestJob job, List<ServerTestItem> batch, bool multi,
         Func<ServerTestItem, CancellationToken, Task> perItem,
         ConcurrentDictionary<string, byte> pending, CancellationToken ct)
     {
         ProcessService? proc = null;
         var coreFailed = false;
+        string? rejectReason = null;
         using (await _coreSlots.AcquireAsync(ct))
         {
             try
             {
                 await _coreStartGate.WaitAsync(ct);
+                Interlocked.Increment(ref AppHost.QuietCoreStarts);
                 try
                 {
+                    AppHost.LastTestCoreError = null;
                     proc = multi
                         ? await CoreManager.Instance.LoadCoreConfigSpeedtest(batch)
                         : await CoreManager.Instance.LoadCoreConfigSpeedtest(batch[0]);
@@ -467,10 +502,15 @@ public sealed class TestService
                 }
                 finally
                 {
+                    Interlocked.Decrement(ref AppHost.QuietCoreStarts);
                     _coreStartGate.Release();
                 }
 
                 coreFailed = proc is null || proc.HasExited;
+                if (coreFailed && batch.Count == 1)
+                {
+                    rejectReason = AppHost.LastTestCoreError;
+                }
                 if (!coreFailed)
                 {
                     await Task.WhenAll(batch.Select(async it =>
@@ -530,6 +570,13 @@ public sealed class TestService
         }
 
         var only = batch[0];
+        // The broken server of a rejected batch: one line in the journal instead of the core's noise.
+        var reason = rejectReason is { } r ? r[(r.LastIndexOf(" > ", StringComparison.Ordinal) is var i and >= 0 ? i + 3 : 0)..].Trim() : ResUI.FailedToRunCore;
+        var name = (await AppManager.Instance.GetProfileItem(only.IndexId))?.Remarks ?? only.IndexId;
+        if (_rejectedLogged.TryAdd(only.IndexId + "|" + reason, 0))
+        {
+            LogBus.Write(Loc.T($"[test] core rejects server «{name}»: {reason}", $"[тест] ядро не принимает сервер «{name}»: {reason}"));
+        }
         ProfileExManager.Instance.SetTestDelay(only.IndexId, -1);
         job.Delays[only.IndexId] = -1;
         Report(new TestUpdate(only.IndexId, Delay: -1, DelayStatus: "", SpeedStatus: ResUI.FailedToRunCore));

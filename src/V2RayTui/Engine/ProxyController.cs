@@ -719,6 +719,7 @@ public sealed class ProxyController
     /// </summary>
     public async Task AfterSubscriptionsUpdatedAsync()
     {
+        await ProfileFixups.NormalizeAsync();
         ServersChanged?.Invoke();
         if (!CoreRunning)
         {

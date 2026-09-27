@@ -177,6 +177,7 @@ public static class AppHost
         await CertPemManager.Instance.Init(Config);
 
         await ProxyController.EnforceAutoUpdateLimitAsync();
+        await ProfileFixups.NormalizeAsync();
         if (registerScheduledTasks)
         {
             // v2rayN's own scheduler: per-subscription auto update, geo files, config autosave.
@@ -218,9 +219,40 @@ public static class AppHost
         }
     }
 
+    /// <summary>
+    /// Non-zero while test cores are being started: their "Запуск сервиса…", config path, banner and
+    /// "config rejected" messages go to the log file only (the tester reports a rejected server itself).
+    /// </summary>
+    internal static int QuietCoreStarts;
+
+    /// <summary>The last "Failed to start: …" of a test core (why the core rejected a config).</summary>
+    internal static string? LastTestCoreError;
+
+    private static readonly ConcurrentDictionary<string, byte> _seenDeprecations = new();
+
     private static Task OnCoreMessage(bool notify, string msg)
     {
-        if (notify)
+        var testCore = Volatile.Read(ref QuietCoreStarts) > 0 || msg.Contains("configTest");
+        if (testCore && msg.StartsWith("Failed to start"))
+        {
+            LastTestCoreError = msg;
+        }
+        // xray repeats "The feature X is deprecated" for every outbound of every test core: keep each once.
+        var dep = msg.IndexOf("The feature ", StringComparison.Ordinal);
+        if (dep >= 0 && msg.Contains("deprecated"))
+        {
+            var feature = msg[dep..Math.Min(msg.Length, msg.IndexOf(" is deprecated", dep, StringComparison.Ordinal) is var e and > 0 ? e : msg.Length)];
+            if (!_seenDeprecations.TryAdd(feature, 0))
+            {
+                return Task.CompletedTask;
+            }
+        }
+
+        if (testCore && !LogBus.KeepCoreOutput)
+        {
+            LogBus.WriteFileOnly("[test-core] " + msg);
+        }
+        else if (notify)
         {
             LogBus.Notice(msg);
         }

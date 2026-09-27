@@ -598,7 +598,12 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
         {
             return await ConfigHandler.AddSubItem(AppHost.Config, text) == 0 ? 1 : 0;
         }
-        return await ConfigHandler.AddBatchServers(AppHost.Config, text, subId ?? "", false);
+        var added = await ConfigHandler.AddBatchServers(AppHost.Config, text, subId ?? "", false);
+        if (added > 0)
+        {
+            await ProfileFixups.NormalizeAsync();
+        }
+        return added;
     }
 
     private static async Task<int> CoreAsync(ArgList args)
