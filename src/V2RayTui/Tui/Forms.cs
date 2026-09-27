@@ -62,7 +62,8 @@ internal sealed class Form : IDisposable
     {
         AddLabel(label);
         var current = Math.Clamp(selected, 0, Math.Max(0, items.Count - 1));
-        var btn = new Button { X = _labelWidth + 2, Y = _y++, Text = items.Count > 0 ? items[current] : "-" };
+        // No shadow: it would be drawn over the next row of the form.
+        var btn = new Button { X = _labelWidth + 2, Y = _y++, Text = items.Count > 0 ? items[current] : "-", ShadowStyle = ShadowStyles.None };
         btn.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -244,39 +245,28 @@ internal static class SettingsDialogs
 {
     private static string L(string en, string ru) => Loc.T(en, ru);
 
-    public static bool Tests(IApplication app, IReadOnlyList<SubItem> subs)
+    /// <summary>Manual tests and the test engine (shared by manual and background tests).</summary>
+    public static bool Tests(IApplication app)
     {
         var s = AppHost.Settings;
-        var subNames = new List<string> { L("All servers", "Все серверы") };
-        subNames.AddRange(subs.Select(x => x.Remarks));
-        int SubIndex(string id) => id.IsNullOrEmpty() ? 0 : Math.Max(0, subs.ToList().FindIndex(x => x.Id == id) + 1);
-        string SubId(int i) => i <= 0 || i > subs.Count ? "" : subs[i - 1].Id;
-
-        using var f = new Form(L("Tests & background", "Тесты и фоновый режим"), 30);
-        f.Section(L("Parallel test engine", "Параллельный движок тестов"));
+        using var f = new Form(L("Tests", "Тесты"), 36);
+        f.Section(L("Parallel test engine (manual and background)", "Параллельный движок (ручные и фоновые тесты)"));
         var batch = f.Number(L("Servers per core process", "Серверов на процесс ядра"), s.BatchSize);
         var cores = f.Number(L("Core processes at once", "Процессов ядра одновременно"), s.ParallelCores);
         var pings = f.Number(L("Parallel pings", "Параллельных пингов"), s.PingConcurrency);
-        var speeds = f.Number(L("Parallel speed tests (manual)", "Параллельных замеров скорости (вручную)"), s.SpeedConcurrency);
-        var bgSpeeds = f.Number(L("Speed tests at once (background)", "Замеров скорости одновременно (фон)"), s.BackgroundSpeedConcurrency);
-        var top = f.Number(L("Speed test top-N (0 = all)", "Скорость для топ-N (0 = всех)"), s.SpeedTopN);
+
+        f.Section(L("Manual tests", "Ручные тесты"));
+        var speeds = f.Number(L("Speed tests at once", "Замеров скорости одновременно"), s.SpeedConcurrency);
+        var top = f.Number(L("`m`: speed of top-N (0 = all)", "«m»: скорость топ-N (0 = все)"), s.SpeedTopN);
+        var sort = f.Check(L("Sort the list after a test", "Сортировать список после теста"), s.SortAfterTest);
+        f.Note(L("Speed test duration and URLs: F2 → Test URLs & timeouts.", "Длительность замера и URL: F2 → URL и таймауты тестов."));
+
+        f.Section(L("Exit IP / country", "Выходной IP / страна"));
         var ip = f.Check(L("Tests: query exit IP / country", "Тесты: определять выходной IP / страну"), s.QueryIpInfo);
         var geoOnConnect = f.Check(L("On connect: check IP / country vs name", "При подключении: сверять IP / страну с названием"), s.CheckCountryOnConnect);
-        var sort = f.Check(L("Sort list after a test", "Сортировать список после теста"), s.SortAfterTest);
-        var coreOut = f.Check(L("Show core output in log", "Показывать вывод ядра в журнале"), s.ShowCoreOutput);
 
-        f.Section(L("Background", "Фоновый режим"));
-        var bgOn = f.Check(L("Enabled", "Включён"), s.BackgroundEnabled);
-        var interval = f.Number(L("Interval, minutes", "Интервал, минут"), s.BackgroundIntervalMinutes);
-        var mode = f.Options(L("Mode", "Режим"), s.BackgroundMode);
-        var scope = f.Picker(L("Servers", "Серверы"), subNames, SubIndex(s.BackgroundSubId));
-        var upd = f.Check(L("Update subscriptions first", "Сначала обновлять подписки"), s.UpdateSubsBeforeTest);
-        var afterUpd = f.Check(L("Test after a subscription update", "Тестировать после обновления подписки"), s.TestAfterSubUpdate);
-        var sw = f.Options(L("Auto switch", "Автопереключение"), s.AutoSwitch);
-        var thr = f.Number(L("Switch if faster by, %", "Переключать, если быстрее на, %"), s.SwitchThresholdPercent);
-        var swScope = f.Picker(L("Switch only within", "Переключать только в"), subNames, SubIndex(s.AutoSwitchSubId));
-        f.Note(L("Failover: switch only when the active server is dead.\nFastest: also when another one is faster by the threshold.",
-                 "Failover — только если активный сервер умер.\nFastest — ещё и если другой быстрее на заданный порог."));
+        f.Section(L("Journal", "Журнал"));
+        var coreOut = f.Check(L("Show core output in the journal", "Показывать вывод ядер в журнале"), s.ShowCoreOutput);
 
         if (!f.Run(app))
         {
@@ -286,22 +276,97 @@ internal static class SettingsDialogs
         s.ParallelCores = Form.Int(cores, s.ParallelCores);
         s.PingConcurrency = Form.Int(pings, s.PingConcurrency);
         s.SpeedConcurrency = Form.Int(speeds, s.SpeedConcurrency);
-        s.BackgroundSpeedConcurrency = Form.Int(bgSpeeds, s.BackgroundSpeedConcurrency);
         s.SpeedTopN = Form.Int(top, s.SpeedTopN);
+        s.SortAfterTest = Form.Bool(sort);
         s.QueryIpInfo = Form.Bool(ip);
         s.CheckCountryOnConnect = Form.Bool(geoOnConnect);
-        s.SortAfterTest = Form.Bool(sort);
         s.ShowCoreOutput = Form.Bool(coreOut);
+        AppHost.SaveSettings();
+        return true;
+    }
+
+    /// <summary>Scheduler, subscription rate limit and auto switching (the Alive group relies on them).</summary>
+    public static bool Background(IApplication app, IReadOnlyList<SubItem> subs)
+    {
+        var s = AppHost.Settings;
+        var aliveOn = s.AliveEnabled;
+        // The Alive group is a result of the cycle, never its source.
+        var sources = subs.Where(x => x.Id != AliveGroup.CurrentId).ToList();
+        var scopeNames = new List<string> { L("All servers", "Все серверы") };
+        scopeNames.AddRange(sources.Select(x => x.Remarks));
+        int ScopeIndex(string id) => id.IsNullOrEmpty() ? 0 : Math.Max(0, sources.FindIndex(x => x.Id == id) + 1);
+        string ScopeId(int i) => i <= 0 || i > sources.Count ? "" : sources[i - 1].Id;
+
+        var switchNames = new List<string> { aliveOn ? $"{s.AliveName} ({L("default", "по умолчанию")})" : L("All tested", "Все протестированные") };
+        switchNames.AddRange(sources.Select(x => x.Remarks));
+
+        using var f = new Form(L("Background", "Фоновый режим"), 36);
+        f.Section(L("Schedule", "Расписание"));
+        var bgOn = f.Check(L("Enabled", "Включён"), s.BackgroundEnabled);
+        var interval = f.Number(L("Interval after a cycle ends, min", "Пауза между циклами, мин"), s.BackgroundIntervalMinutes);
+        var scope = f.Picker(L("Test servers of", "Тестировать серверы"), scopeNames, ScopeIndex(s.BackgroundSubId));
+        TextField? topSpeeds = null;
+        OptionSelector<TestMode>? mode = null;
+        CheckBox? upd = null;
+        if (aliveOn)
+        {
+            f.Note(L($"The {s.AliveName} group is on: each cycle updates due subscriptions, pings every server\nand measures the speed of every one that answered (mode and top-N do not apply).",
+                     $"Группа {s.AliveName} включена: каждый цикл обновляет подписки (если пора), пингует все серверы\nи меряет скорость каждого ответившего (режим и топ-N не применяются)."));
+        }
+        else
+        {
+            mode = f.Options(L("Mode", "Режим"), s.BackgroundMode);
+            upd = f.Check(L("Update subscriptions first", "Сначала обновлять подписки"), s.UpdateSubsBeforeTest);
+        }
+        var afterUpd = f.Check(L("Test after a subscription update", "Тестировать после обновления подписки"), s.TestAfterSubUpdate);
+
+        f.Section(L("Speed tests in background", "Замер скорости в фоне"));
+        var bgSpeeds = f.Number(L("Speed tests at once", "Замеров одновременно"), s.BackgroundSpeedConcurrency);
+        var bgSeconds = f.Number(L("Duration of one test, s", "Длительность одного замера, с"), s.BackgroundSpeedTestSeconds);
+        f.Note(L("1 at a time: each server gets the whole link, results are comparable.", "По одному: каждый сервер получает весь канал, результаты сравнимы."));
+
+        f.Section(L("Subscriptions", "Подписки"));
+        var subLimit = f.Number(L("Update not more often than, min", "Обновлять не чаще, чем раз в, мин"), s.SubUpdateMinIntervalMinutes);
+
+        f.Section(L("Auto switch", "Автопереключение"));
+        var sw = f.Options(L("Mode", "Режим"), s.AutoSwitch);
+        var thr = f.Number(L("Fastest: if faster by, %", "Fastest: если быстрее на, %"), s.SwitchThresholdPercent);
+        var swScope = f.Picker(L("Switch only within", "Переключать только в"), switchNames, ScopeIndex(s.AutoSwitchSubId));
+        f.Note(L("Off: the active server is never changed automatically.\nFailover: only when the active server is dead. Fastest: also when another one is faster.",
+                 "Off — активный сервер сам не меняется.\nFailover — только если активный умер. Fastest — ещё и если другой быстрее на порог."));
+
+        f.Validate = () => aliveOn && !Form.Bool(bgOn)
+            ? L($"The {s.AliveName} group needs the background mode: turn the group off first (F2 → {s.AliveName}).",
+                $"Группе {s.AliveName} нужен фоновый режим: сначала выключите группу (F2 → {s.AliveName}).")
+            : null;
+        if (!f.Run(app))
+        {
+            return false;
+        }
         s.BackgroundEnabled = Form.Bool(bgOn);
         s.BackgroundIntervalMinutes = Form.Int(interval, s.BackgroundIntervalMinutes);
-        s.BackgroundMode = mode.Value ?? s.BackgroundMode;
-        s.BackgroundSubId = SubId(scope());
-        s.UpdateSubsBeforeTest = Form.Bool(upd);
+        s.BackgroundSubId = ScopeId(scope());
+        if (mode != null)
+        {
+            s.BackgroundMode = mode.Value ?? s.BackgroundMode;
+        }
+        if (upd != null)
+        {
+            s.UpdateSubsBeforeTest = Form.Bool(upd);
+        }
         s.TestAfterSubUpdate = Form.Bool(afterUpd);
+        s.BackgroundSpeedConcurrency = Form.Int(bgSpeeds, s.BackgroundSpeedConcurrency);
+        s.BackgroundSpeedTestSeconds = Form.Int(bgSeconds, s.BackgroundSpeedTestSeconds);
+        var oldLimit = s.SubUpdateMinIntervalMinutes;
+        s.SubUpdateMinIntervalMinutes = Form.Int(subLimit, s.SubUpdateMinIntervalMinutes);
         s.AutoSwitch = sw.Value ?? s.AutoSwitch;
         s.SwitchThresholdPercent = Form.Int(thr, s.SwitchThresholdPercent);
-        s.AutoSwitchSubId = SubId(swScope());
+        s.AutoSwitchSubId = ScopeId(swScope());
         AppHost.SaveSettings();
+        if (s.SubUpdateMinIntervalMinutes != oldLimit)
+        {
+            _ = ProxyController.EnforceAutoUpdateLimitAsync();
+        }
         return true;
     }
 
@@ -361,22 +426,15 @@ internal static class SettingsDialogs
         var name = f.Text(L("Group name", "Название группы"), s.AliveName);
         var minSpeed = f.Text(L("Min speed, MB/s", "Мин. скорость, МБ/с"), s.AliveMinSpeed.ToString(System.Globalization.CultureInfo.InvariantCulture));
         var maxDelay = f.Number(L("Max delay, ms (0 = any)", "Макс. задержка, мс (0 = любая)"), s.AliveMaxDelay);
-        var interval = f.Number(L("Re-test every, minutes", "Перепроверять каждые, минут"), s.BackgroundIntervalMinutes);
-        var speeds = f.Number(L("Speed tests at once", "Замеров скорости одновременно"), s.BackgroundSpeedConcurrency);
-        var speedSec = f.Number(L("One speed test, seconds", "Длительность замера, секунд"), s.BackgroundSpeedTestSeconds);
-        var subLimit = f.Number(L("Subscriptions: not more often, min", "Подписки: не чаще, мин"), s.SubUpdateMinIntervalMinutes);
-        var sw = f.Options(L("Auto switch (off by default)", "Автопереключение (по умолч. выкл.)"), s.AutoSwitch);
         f.Note(L(
             "Each background cycle: update subscriptions (if due) → ping every server → measure the speed\n" +
             "of every server that answered → rebuild the group (add new, drop dead/slow, keep the rest).\n" +
-            "Subscription updates never touch the group. 1 speed test at a time = accurate, but a cycle\n" +
-            "takes ≈ distinct alive servers × test duration; the next cycle starts after the previous one ends.\n" +
-            "Auto switch Off: the active server is never changed, even if it drops out (it stays in the group).",
+            "Subscription updates never touch the group.\n" +
+            "Cycle interval, speed test settings, subscription rate limit and auto switch: F2 → Background.",
             "Каждый фоновый цикл: обновить подписки (если пора) → пинг всех серверов → скорость всех\n" +
             "ответивших → пересобрать группу (новые добавить, мёртвые/медленные убрать, остальные не трогать).\n" +
-            "Обновление подписок группу не затрагивает. 1 замер за раз — точно, но цикл длится примерно\n" +
-            "«различные живые серверы × длительность замера»; следующий начинается после окончания предыдущего.\n" +
-            "Автопереключение выкл.: активный сервер не меняется, даже если выбыл (он остаётся в группе)."));
+            "Обновление подписок группу не затрагивает.\n" +
+            "Интервал циклов, замер скорости, частота обновления подписок и автопереключение: F2 → Фоновый режим."));
 
         static decimal? ParseSpeed(string text) =>
             decimal.TryParse(text.Trim().Replace(',', '.'), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= 0 ? v : null;
@@ -390,13 +448,9 @@ internal static class SettingsDialogs
         s.AliveName = name.Text.Trim();
         s.AliveMinSpeed = ParseSpeed(minSpeed.Text) ?? s.AliveMinSpeed;
         s.AliveMaxDelay = Form.Int(maxDelay, s.AliveMaxDelay);
-        s.BackgroundIntervalMinutes = Form.Int(interval, s.BackgroundIntervalMinutes);
-        s.BackgroundSpeedConcurrency = Form.Int(speeds, s.BackgroundSpeedConcurrency);
-        s.BackgroundSpeedTestSeconds = Form.Int(speedSec, s.BackgroundSpeedTestSeconds);
-        s.SubUpdateMinIntervalMinutes = Form.Int(subLimit, s.SubUpdateMinIntervalMinutes);
-        s.AutoSwitch = sw.Value ?? s.AutoSwitch;
         if (s.AliveEnabled)
         {
+            // The group is maintained by the background cycles.
             s.BackgroundEnabled = true;
         }
         AppHost.SaveSettings();
@@ -411,7 +465,8 @@ internal static class SettingsDialogs
         f.Note("  " + string.Join("  ", Global.SpeedPingTestUrls.Take(3)));
         var speed = f.Text(L("Speed test URL", "URL для скорости"), st.SpeedTestUrl);
         f.Note("  " + string.Join("  ", Global.SpeedTestUrls.Take(2)));
-        var timeout = f.Number(L("Speed test timeout, s", "Таймаут скорости, с"), st.SpeedTestTimeout);
+        var timeout = f.Number(L("Manual speed test duration, s", "Длительность ручного замера скорости, с"), st.SpeedTestTimeout);
+        f.Note(L("Background speed tests have their own duration: F2 → Background.", "У фоновых замеров своя длительность: F2 → Фоновый режим."));
         var ipApi = f.Text(L("IP info API", "API для IP"), st.IPAPIUrl);
 
         if (!f.Run(app))

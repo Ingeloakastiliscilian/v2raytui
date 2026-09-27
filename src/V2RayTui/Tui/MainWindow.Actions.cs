@@ -856,7 +856,10 @@ internal sealed partial class MainWindow
         BackgroundScheduler.Instance.Reschedule();
         LogBus.Notice(AppHost.Settings.BackgroundEnabled
             ? L($"Background tests on (every {AppHost.Settings.BackgroundIntervalMinutes} min)", $"Фоновые тесты включены (каждые {AppHost.Settings.BackgroundIntervalMinutes} мин)")
-            : L("Background tests off", "Фоновые тесты выключены"));
+            : AppHost.Settings.AliveEnabled
+                ? L($"Background tests off — the {AppHost.Settings.AliveName} group is not updated until `b` again",
+                    $"Фоновые тесты выключены — группа {AppHost.Settings.AliveName} не обновляется до повторного `b`")
+                : L("Background tests off", "Фоновые тесты выключены"));
     }
 
     #endregion proxy / routing / tun / updates
@@ -887,13 +890,14 @@ internal sealed partial class MainWindow
     {
         var sel = Dialogs.Choose(App!, L("Settings", "Настройки"),
         [
-            L("Tests & background", "Тесты и фоновый режим"),
-            L("Local proxy (ports, LAN, sniffing, logs)", "Локальный прокси (порты, LAN, sniffing, логи)"),
+            L("Tests", "Тесты"),
+            L("Background (schedule, subscriptions, auto switch)", "Фоновый режим (расписание, подписки, автопереключение)"),
+            L("Alive group (live fast servers)", "Группа Alive (живые быстрые серверы)"),
+            L("Local proxy (ports, LAN, sniffing, TUN, logs)", "Локальный прокси (порты, LAN, sniffing, TUN, логи)"),
             L("Test URLs & timeouts", "URL и таймауты тестов"),
             L("Regional preset (routing / geo / DNS)", "Региональный пресет (маршруты / geo / DNS)"),
-            L("Alive group (live fast servers)", "Группа Alive (живые быстрые серверы)"),
         ]);
-        if (sel == 4)
+        if (sel == 2)
         {
             var wasOn = AppHost.Settings.AliveEnabled;
             if (SettingsDialogs.Alive(App!))
@@ -909,7 +913,7 @@ internal sealed partial class MainWindow
             }
             return;
         }
-        if (sel == 3)
+        if (sel == 5)
         {
             var presets = Enum.GetValues<EPresetType>();
             if (Dialogs.Choose(App!, L("Regional preset", "Региональный пресет"), presets.Select(p => p.ToString()).ToList()) is { } pi)
@@ -924,9 +928,10 @@ internal sealed partial class MainWindow
         }
         var changed = sel switch
         {
-            0 => SettingsDialogs.Tests(App!, _subs),
-            1 => SettingsDialogs.Proxy(App!),
-            2 => SettingsDialogs.TestUrls(App!),
+            0 => SettingsDialogs.Tests(App!),
+            1 => SettingsDialogs.Background(App!, _subs),
+            3 => SettingsDialogs.Proxy(App!),
+            4 => SettingsDialogs.TestUrls(App!),
             _ => false,
         };
         if (!changed)
@@ -936,7 +941,7 @@ internal sealed partial class MainWindow
         TestService.Instance.ApplySettings(AppHost.Settings);
         BackgroundScheduler.Instance.Reschedule();
         _stateDirty = true;
-        if (sel == 1 && ProxyController.Instance.CoreRunning)
+        if (sel == 3 && ProxyController.Instance.CoreRunning)
         {
             Fire(ProxyController.Instance.ReloadAsync);
         }
