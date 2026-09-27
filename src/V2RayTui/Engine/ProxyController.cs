@@ -54,7 +54,26 @@ public sealed class ProxyController
                 return;
             }
 
-            var all = await CoreConfigContextBuilder.BuildAll(Config, profile);
+            // TUN is wanted (saved setting) but sudo is not available in this session: start without it,
+            // keeping the setting, so the next start with a password brings TUN back.
+            var tunWanted = Config.TunModeItem.EnableTun;
+            var tunSuppressed = tunWanted && !TunAllowed;
+            if (tunSuppressed)
+            {
+                Config.TunModeItem.EnableTun = false;
+                LogBus.Notice(Loc.T("TUN is on but no sudo access in this session — starting without TUN",
+                    "TUN включён, но в этом сеансе нет доступа sudo — запуск без TUN"));
+            }
+            CoreConfigContextBuilderAllResult all;
+            try
+            {
+                all = await CoreConfigContextBuilder.BuildAll(Config, profile);
+            }
+            finally
+            {
+                Config.TunModeItem.EnableTun = tunWanted;
+            }
+            TunActive = tunWanted && !tunSuppressed;
             if (NoticeManager.Instance.NotifyValidatorResult(all.CombinedValidatorResult) && !all.Success)
             {
                 return;
@@ -453,12 +472,77 @@ public sealed class ProxyController
 
     public static bool TunAllowed => Utils.IsWindows() ? Utils.IsAdministrator() : AppManager.Instance.LinuxSudoPwd.IsNotEmpty();
 
+    /// <summary>TUN is part of the running configuration.</summary>
+    public bool TunActive { get; private set; }
+
+    /// <summary>
+    /// Sudo without a password already works for the TUN core (a sudoers rule): TUN can start unattended.
+    /// The engine pipes LinuxSudoPwd to `sudo -S`, so a placeholder is set.
+    /// </summary>
+    public static async Task<bool> TryPasswordlessSudoAsync()
+    {
+        if (Utils.IsWindows() || TunAllowed)
+        {
+            return TunAllowed;
+        }
+        var core = CoreInfoManager.Instance.GetCoreExecFile(CoreInfoManager.Instance.GetCoreInfo(ECoreType.sing_box), out _);
+        if (core.IsNullOrEmpty())
+        {
+            return false;
+        }
+        if (await RunSudoAsync(["-n", "-l", core], null) == 0)
+        {
+            AppManager.Instance.LinuxSudoPwd = "nopasswd";
+            LogBus.Write(Loc.T("sudo without password is allowed for the TUN core", "sudo без пароля разрешён для ядра TUN"));
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Checks a sudo password (`sudo -k -S -v`) and keeps it in memory for this session.</summary>
+    public static async Task<bool> UseSudoPasswordAsync(string password)
+    {
+        if (await RunSudoAsync(["-k", "-S", "-p", "", "-v"], password) != 0)
+        {
+            return false;
+        }
+        AppManager.Instance.LinuxSudoPwd = password;
+        return true;
+    }
+
+    private static async Task<int> RunSudoAsync(IEnumerable<string> args, string? stdin)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("sudo") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var a in args)
+            {
+                psi.ArgumentList.Add(a);
+            }
+            using var p = Process.Start(psi)!;
+            await p.StandardInput.WriteLineAsync(stdin ?? "");
+            p.StandardInput.Close();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await p.WaitForExitAsync(cts.Token);
+            return p.ExitCode;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
     /// <summary>Toggles TUN. On Linux/macOS a sudo password is required (kept in memory only).</summary>
     public async Task<bool> SetTunAsync(bool enable, string? sudoPassword)
     {
-        if (enable && !Utils.IsWindows() && sudoPassword.IsNotEmpty())
+        if (enable && !Utils.IsWindows() && sudoPassword.IsNotEmpty() && !await UseSudoPasswordAsync(sudoPassword))
         {
-            AppManager.Instance.LinuxSudoPwd = sudoPassword;
+            LogBus.Notice(Loc.T("Wrong sudo password", "Неверный пароль sudo"));
+            return false;
+        }
+        if (enable && !TunAllowed)
+        {
+            await TryPasswordlessSudoAsync();
         }
         if (enable && !TunAllowed)
         {

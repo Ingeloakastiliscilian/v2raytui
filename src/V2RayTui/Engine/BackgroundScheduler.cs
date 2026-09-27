@@ -37,6 +37,11 @@ public sealed class BackgroundScheduler
         TestService.Instance.JobChanged += OnJobChanged;
         Reschedule();
         _loop = Task.Run(() => LoopAsync(_cts.Token));
+        if (S.BackgroundEnabled)
+        {
+            // Starts working right away rather than after the first interval.
+            RunNow();
+        }
     }
 
     public async Task StopAsync()

@@ -790,7 +790,7 @@ internal sealed partial class MainWindow
     {
         var enable = !Config.TunModeItem.EnableTun;
         string? pwd = null;
-        if (enable && !Utils.IsWindows() && !ProxyController.TunAllowed)
+        if (enable && !Utils.IsWindows() && !ProxyController.TunAllowed && !Task.Run(ProxyController.TryPasswordlessSudoAsync).GetAwaiter().GetResult())
         {
             pwd = Dialogs.Prompt(App!, "TUN", L("sudo password (kept in memory only):", "Пароль sudo (хранится только в памяти):"), secret: true);
             if (pwd.IsNullOrEmpty())

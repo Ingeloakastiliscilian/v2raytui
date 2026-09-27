@@ -59,6 +59,11 @@ public static class Daemon
                 LogBus.Write($"missing: {string.Join(", ", missing)} — " + Loc.T("downloading", "загрузка"));
                 await CoreUpdater.InstallMissingAsync(viaProxy: false);
             }
+            if (AppHost.Config.TunModeItem.EnableTun && !await ProxyController.TryPasswordlessSudoAsync())
+            {
+                LogBus.Write(Loc.T("TUN is on, but the daemon cannot ask for a sudo password: starting without TUN (see README: unattended TUN).",
+                    "TUN включён, но daemon не может спросить пароль sudo: запуск без TUN (см. README: TUN без пароля)."));
+            }
             if (!args.Has("--no-core"))
             {
                 await ProxyController.Instance.ReloadAsync();

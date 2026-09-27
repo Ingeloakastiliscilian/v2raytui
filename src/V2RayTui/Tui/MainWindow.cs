@@ -215,6 +215,7 @@ internal sealed partial class MainWindow : Runnable
             }
         }
 
+        await EnsureTunAccessAsync();
         if (_rows.Count > 0 || await ConfigHandler.GetDefaultServer(Config) != null)
         {
             await ProxyController.Instance.ReloadAsync();
@@ -227,6 +228,32 @@ internal sealed partial class MainWindow : Runnable
         BackgroundScheduler.Instance.Start();
         ProxyController.Instance.StartWatchdog();
         MarkStateDirty();
+    }
+
+    /// <summary>TUN was left on: get sudo access at start (passwordless rule, or ask the password).</summary>
+    private async Task EnsureTunAccessAsync()
+    {
+        if (!Config.TunModeItem.EnableTun || ProxyController.TunAllowed || Utils.IsWindows()
+            || await ProxyController.TryPasswordlessSudoAsync())
+        {
+            return;
+        }
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var pwd = await OnUi(() => Dialogs.Prompt(App!, "TUN",
+                attempt == 0
+                    ? L("TUN is on. sudo password (kept in memory only; Esc — start without TUN):", "TUN включён. Пароль sudo (хранится только в памяти; Esc — без TUN):")
+                    : L("Wrong password, try again:", "Неверный пароль, ещё раз:"),
+                secret: true));
+            if (pwd.IsNullOrEmpty())
+            {
+                return;
+            }
+            if (await ProxyController.UseSudoPasswordAsync(pwd))
+            {
+                return;
+            }
+        }
     }
 
     /// <summary>UI refresh pump: coalesces updates from worker threads.</summary>
@@ -571,11 +598,14 @@ internal sealed partial class MainWindow : Runnable
             _ => L("unchanged", "не менять"),
         };
         var tun = Config.TunModeItem.EnableTun;
+        var tunNoAccess = tun && pc.CoreRunning && !pc.TunActive;
         var right = new List<SegmentBar.Segment>
         {
             new($"⇄ :{AppManager.Instance.GetLocalPort(EInboundProtocol.socks)}{(inbound.AllowLANConn ? " LAN" : "")}  ", Theme.A(Theme.Sub)),
             new($"{L("sysproxy", "сист.прокси")}: {sys}  ", Theme.A(Theme.Sub)),
-            new(tun ? " TUN " : "TUN ", tun ? Theme.A(Theme.Crust, Theme.Teal, TextStyle.Bold) : Theme.A(Theme.Dim)),
+            tunNoAccess
+                ? new(" TUN ⚠ ", Theme.A(Theme.Crust, Theme.Peach, TextStyle.Bold))
+                : new(tun ? " TUN " : "TUN ", tun ? Theme.A(Theme.Crust, Theme.Teal, TextStyle.Bold) : Theme.A(Theme.Dim)),
             new($"  ⤳ {_routingName} ", Theme.A(Theme.Sub)),
         };
         _header.Set(left, right);
@@ -594,7 +624,7 @@ internal sealed partial class MainWindow : Runnable
         }
         else if (AppHost.Settings.BackgroundEnabled)
         {
-            segs.Add(new($"◷ {L("next cycle", "след. цикл")} {bg.NextRun:HH:mm}", Theme.A(Theme.Sub)));
+            segs.Add(new($"◷ {L("next cycle", "след. цикл")} {(bg.NextRun is { } next ? next.ToString("HH:mm") : "…")}", Theme.A(Theme.Sub)));
             if (bg.LastRun is { } last)
             {
                 segs.Add(new($"  ({L("last", "посл.")} {last:HH:mm})", Theme.A(Theme.Dim)));
