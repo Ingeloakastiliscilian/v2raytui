@@ -46,6 +46,11 @@ public static class ServerRepository
     {
         var config = AppHost.Config;
         var models = await AppManager.Instance.ProfileModels(subId ?? "", filter ?? "") ?? [];
+        // "All servers" means the subscriptions' servers: the Alive group holds copies of them.
+        if (subId.IsNullOrEmpty() && AliveGroup.CurrentId is { } aliveId)
+        {
+            models = models.Where(m => m.Subid != aliveId).ToList();
+        }
         await ConfigHandler.SetDefaultServer(config, models);
 
         var exs = (await ProfileExManager.Instance.GetProfileExs())

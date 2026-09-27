@@ -34,10 +34,18 @@ public static class AliveGroup
             };
             await ConfigHandler.AddSubItem(Config, sub);
             LogBus.Write($"[alive] " + Loc.T($"group \"{S.AliveName}\" created", $"создана группа «{S.AliveName}»"));
+            ProxyController.Instance.NotifyServersChanged();
         }
         else if (sub.Remarks != S.AliveName)
         {
             sub.Remarks = S.AliveName;
+            await ConfigHandler.AddSubItem(Config, sub);
+        }
+        // First in the subscription list (v2rayN orders by Sort, so the GUI shows it first too).
+        var others = subs.Where(x => x.Id != sub.Id).ToList();
+        if (others.Count > 0 && sub.Sort >= others.Min(x => x.Sort))
+        {
+            sub.Sort = others.Min(x => x.Sort) - 1;
             await ConfigHandler.AddSubItem(Config, sub);
         }
         if (S.AliveSubId != sub.Id)
@@ -67,6 +75,22 @@ public static class AliveGroup
         return JsonUtils.Serialize(c, false);
     }
 
+    public static bool IsCandidate(ProfileItem p, string groupId) =>
+        p.Subid != groupId && !p.ConfigType.IsComplexType() && p.ConfigType is not (EConfigType.Custom or EConfigType.Outbound);
+
+    public static bool Qualifies(int delay, decimal speed) =>
+        delay > 0 && speed > 0 && speed >= S.AliveMinSpeed && (S.AliveMaxDelay == 0 || delay <= S.AliveMaxDelay);
+
+    internal static async Task<ProfileItem> AddCopyAsync(ProfileItem source, string groupId)
+    {
+        var copy = JsonUtils.DeepCopy(source)!;
+        copy.IndexId = string.Empty;
+        copy.Subid = groupId;
+        copy.IsSub = false;
+        await ConfigHandler.AddServerCommon(Config, copy, true);
+        return copy;
+    }
+
     public sealed record SyncResult(int Total, int Added, int Removed, bool Skipped);
 
     /// <summary>Rebuilds the group from a finished ping+speed job over <paramref name="sources"/>.</summary>
@@ -79,9 +103,9 @@ public static class AliveGroup
         var groupId = await EnsureAsync();
 
         var qualified = sources
-            .Where(p => p.Subid != groupId && !p.ConfigType.IsComplexType() && p.ConfigType is not (EConfigType.Custom or EConfigType.Outbound))
+            .Where(p => IsCandidate(p, groupId))
             .Select(p => (P: p, Delay: job.Delays.GetValueOrDefault(p.IndexId), Speed: job.Speeds.GetValueOrDefault(p.IndexId)))
-            .Where(x => x.Delay > 0 && x.Speed > 0 && x.Speed >= S.AliveMinSpeed && (S.AliveMaxDelay == 0 || x.Delay <= S.AliveMaxDelay))
+            .Where(x => Qualifies(x.Delay, x.Speed))
             .Select(x => (x.P, x.Delay, x.Speed, Key: Key(x.P)))
             .GroupBy(x => x.Key)
             .Select(g => g.OrderByDescending(x => x.Speed).First())
@@ -117,11 +141,7 @@ public static class AliveGroup
         {
             if (!existingByKey.TryGetValue(q.Key, out var copy))
             {
-                copy = JsonUtils.DeepCopy(q.P)!;
-                copy.IndexId = string.Empty;
-                copy.Subid = groupId;
-                copy.IsSub = false;
-                await ConfigHandler.AddServerCommon(Config, copy, true);
+                copy = await AddCopyAsync(q.P, groupId);
                 added++;
             }
             order.Add((copy.IndexId, q.Delay, q.Speed));
@@ -178,5 +198,223 @@ public static class AliveGroup
             $"{S.AliveName}: {order.Count} серверов (+{added} −{toRemove.Count}), ≥ {S.AliveMinSpeed} МБ/с"));
         ProxyController.Instance.NotifyServersChanged();
         return new SyncResult(order.Count + (keptActive ? 1 : 0), added, toRemove.Count, false);
+    }
+}
+
+/// <summary>
+/// Keeps the Alive group up to date while a background cycle runs: a server is added as soon as its
+/// speed test passes, and dropped as soon as every copy of it (from all subscriptions) has been tested
+/// without passing. The end-of-cycle <see cref="AliveGroup.SyncAsync"/> then does the final reconciliation.
+/// Nothing is dropped until at least one server has passed in this cycle (our own network may be down).
+/// </summary>
+public sealed class AliveSession
+{
+    private static TuiSettings S => AppHost.Settings;
+
+    private readonly string _groupId;
+    private readonly Dictionary<string, ProfileItem> _sources;
+    private readonly Dictionary<string, string> _keyOfSource = new();
+    private readonly Dictionary<string, List<string>> _sourcesOfKey = new();
+    private readonly Dictionary<string, int> _pending = new();
+    private int _handled;
+    private readonly Dictionary<string, decimal> _bestSpeed = new();
+    private readonly Dictionary<string, ProfileItem> _copies = new();
+    private readonly List<string> _deferredDrops = [];
+    private readonly Lock _gate = new();
+    private Task _chain = Task.CompletedTask;
+    private bool _keptActiveNoticed;
+
+    private AliveSession(string groupId, IEnumerable<ProfileItem> sources)
+    {
+        _groupId = groupId;
+        _sources = sources.Where(p => AliveGroup.IsCandidate(p, groupId)).DistinctBy(p => p.IndexId).ToDictionary(p => p.IndexId);
+    }
+
+    public int Count => _copies.Count;
+
+    /// <param name="sources">All servers of the cycle (duplicates included).</param>
+    /// <param name="tested">The ones actually tested (one per distinct server).</param>
+    public static async Task<AliveSession> StartAsync(IReadOnlyList<ProfileItem> sources, IReadOnlyList<ProfileItem> tested)
+    {
+        var groupId = await AliveGroup.EnsureAsync();
+        var session = new AliveSession(groupId, sources);
+        foreach (var copy in await AppManager.Instance.ProfileItems(groupId) ?? [])
+        {
+            session._copies.TryAdd(AliveGroup.Key(copy), copy);
+        }
+        foreach (var p in session._sources.Values)
+        {
+            var key = AliveGroup.Key(p);
+            session._keyOfSource[p.IndexId] = key;
+            if (!session._sourcesOfKey.TryGetValue(key, out var ids))
+            {
+                session._sourcesOfKey[key] = ids = [];
+            }
+            ids.Add(p.IndexId);
+        }
+        foreach (var p in tested)
+        {
+            if (session._keyOfSource.TryGetValue(p.IndexId, out var key))
+            {
+                session._pending[key] = session._pending.GetValueOrDefault(key) + 1;
+            }
+        }
+        await session.SeedAsync();
+        return session;
+    }
+
+    /// <summary>
+    /// Fills the group right away from the last saved results (e.g. after a restart);
+    /// the running cycle then confirms or drops each of them.
+    /// </summary>
+    private async Task SeedAsync()
+    {
+        var exs = (await ProfileExManager.Instance.GetProfileExs())
+            .GroupBy(e => e.IndexId)
+            .ToDictionary(g => g.Key, g => g.First());
+        var added = 0;
+        foreach (var (key, ids) in _sourcesOfKey)
+        {
+            var best = ids
+                .Select(id => exs.GetValueOrDefault(id))
+                .Where(e => e != null && AliveGroup.Qualifies(e.Delay, e.Speed))
+                .OrderByDescending(e => e!.Speed)
+                .FirstOrDefault();
+            if (best == null || _copies.ContainsKey(key))
+            {
+                continue;
+            }
+            var copy = await AliveGroup.AddCopyAsync(_sources[best.IndexId], _groupId);
+            _copies[key] = copy;
+            ProfileExManager.Instance.SetTestDelay(copy.IndexId, best.Delay);
+            ProfileExManager.Instance.SetTestSpeed(copy.IndexId, best.Speed);
+            added++;
+        }
+        if (added > 0)
+        {
+            LogBus.Write("[alive] " + Loc.T($"+{added} from the last results (re-checked in this cycle)", $"+{added} по последним замерам (перепроверяются в этом цикле)"));
+            ProxyController.Instance.NotifyServersChanged();
+        }
+    }
+
+    /// <summary>Called from test worker threads; work is serialized.</summary>
+    public void OnItemFinished(string indexId, int delay, decimal speed)
+    {
+        lock (_gate)
+        {
+            _chain = _chain.ContinueWith(_ => HandleAsync(indexId, delay, speed), TaskScheduler.Default).Unwrap();
+        }
+    }
+
+    public Task DrainAsync()
+    {
+        lock (_gate)
+        {
+            return _chain;
+        }
+    }
+
+    private async Task HandleAsync(string indexId, int delay, decimal speed)
+    {
+        try
+        {
+            if (!_keyOfSource.TryGetValue(indexId, out var key))
+            {
+                return;
+            }
+            _pending[key] = _pending.GetValueOrDefault(key) - 1;
+
+            // The same server under other names/subscriptions gets the same result.
+            foreach (var dup in _sourcesOfKey[key].Where(id => id != indexId))
+            {
+                ProfileExManager.Instance.SetTestDelay(dup, delay);
+                if (speed > 0)
+                {
+                    ProfileExManager.Instance.SetTestSpeed(dup, speed);
+                }
+                TestService.Instance.Publish(new TestUpdate(dup, Delay: delay, Speed: speed > 0 ? speed : null, DelayStatus: "", SpeedStatus: ""));
+            }
+            // Survive a restart in the middle of a long cycle.
+            if (++_handled % 5 == 0)
+            {
+                await ProfileExManager.Instance.SaveTo();
+            }
+
+            if (AliveGroup.Qualifies(delay, speed))
+            {
+                var first = _bestSpeed.Count == 0;
+                if (!_bestSpeed.TryGetValue(key, out var best) || speed > best)
+                {
+                    _bestSpeed[key] = speed;
+                }
+                if (!_copies.TryGetValue(key, out var copy))
+                {
+                    copy = await AliveGroup.AddCopyAsync(_sources[indexId], _groupId);
+                    _copies[key] = copy;
+                    LogBus.Write($"[alive] + {copy.Remarks} ({speed} MB/s, {delay} ms)");
+                }
+                ProfileExManager.Instance.SetTestDelay(copy.IndexId, delay);
+                ProfileExManager.Instance.SetTestSpeed(copy.IndexId, _bestSpeed[key]);
+                TestService.Instance.Publish(new TestUpdate(copy.IndexId, Delay: delay, Speed: _bestSpeed[key], DelayStatus: "", SpeedStatus: ""));
+                if (first)
+                {
+                    // The network works: now it is safe to drop what failed so far.
+                    foreach (var k in _deferredDrops.ToList())
+                    {
+                        await DropAsync(k);
+                    }
+                    _deferredDrops.Clear();
+                }
+                ProxyController.Instance.NotifyServersChanged();
+                return;
+            }
+
+            // Drop the server once every copy of it has been tested and none passed.
+            if (_pending[key] <= 0 && !_bestSpeed.ContainsKey(key) && _copies.ContainsKey(key))
+            {
+                if (_bestSpeed.Count == 0)
+                {
+                    _deferredDrops.Add(key);
+                }
+                else
+                {
+                    await DropAsync(key);
+                    ProxyController.Instance.NotifyServersChanged();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logging.SaveLog("AliveSession", ex);
+            LogBus.Write($"[alive] {ex.Message}");
+        }
+    }
+
+    private async Task DropAsync(string key)
+    {
+        if (!_copies.TryGetValue(key, out var copy))
+        {
+            return;
+        }
+        if (copy.IndexId == AppHost.Config.IndexId)
+        {
+            // The active server: never switch here when auto switching is off; otherwise the
+            // end-of-cycle sync moves to the best server of the complete results.
+            if (S.AutoSwitch == AutoSwitchMode.Off && !_keptActiveNoticed)
+            {
+                _keptActiveNoticed = true;
+                LogBus.Notice("[alive] " + Loc.T(
+                    $"the active server {copy.Remarks} no longer qualifies — kept because auto switch is off",
+                    $"активный сервер {copy.Remarks} больше не проходит проверку — оставлен, т.к. автопереключение выключено"));
+            }
+            return;
+        }
+        var fresh = await AppManager.Instance.GetProfileItem(copy.IndexId);
+        if (fresh != null)
+        {
+            await ConfigHandler.RemoveServers(AppHost.Config, [fresh]);
+        }
+        _copies.Remove(key);
+        LogBus.Write($"[alive] − {copy.Remarks}");
     }
 }

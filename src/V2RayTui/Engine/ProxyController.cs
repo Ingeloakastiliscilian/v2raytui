@@ -19,6 +19,9 @@ public sealed class ProxyController
     public event Action? ServersChanged;
 
     public bool CoreRunning { get; private set; }
+
+    /// <summary>The local port another application holds (last start failed because of it), or null.</summary>
+    public int? PortConflict { get; private set; }
     public string RunningSummary { get; private set; } = "-";
     public string AvailabilityText { get; private set; } = "";
 
@@ -56,11 +59,22 @@ public sealed class ProxyController
             if (!CoreRunning)
             {
                 AvailabilityText = ResUI.FailedToRunCore;
+                var port = AppManager.Instance.GetLocalPort(EInboundProtocol.socks);
+                if (await PortAnswersAsync(port))
+                {
+                    PortConflict = port;
+                    var free = SuggestFreeBasePort();
+                    AvailabilityText = Loc.T($"port {port} is used by another application", $"порт {port} занят другим приложением");
+                    LogBus.Notice(Loc.T(
+                        $"Local port {port} is already used by another application (v2rayN GUI?). Change it: F2 → Local proxy" + (free != null ? $" (free: {free})." : "."),
+                        $"Локальный порт {port} уже занят другим приложением (GUI v2rayN?). Смените его: F2 → Локальный прокси" + (free != null ? $" (свободен {free})." : ".")));
+                }
                 await SysProxyHandler.UpdateSysProxy(Config, true);
                 LogBus.Notice($"{ResUI.FailedToRunCore}: {RunningSummary}");
                 StateChanged?.Invoke();
                 return;
             }
+            PortConflict = null;
             await SysProxyHandler.UpdateSysProxy(Config, false);
             StateChanged?.Invoke();
 
@@ -110,6 +124,50 @@ public sealed class ProxyController
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// A base port whose whole range is free. v2rayN derives several ports from the base
+    /// (+0…+6: socks, second/LAN socks, pac, api…; +21 and up: speed tests), so candidates step by 100.
+    /// </summary>
+    public static int? SuggestFreeBasePort()
+    {
+        var current = AppManager.Instance.GetLocalPort(EInboundProtocol.socks);
+        var used = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties()
+            .GetActiveTcpListeners().Select(e => e.Port).ToHashSet();
+        for (var basePort = current + 100; basePort < 60000; basePort += 100)
+        {
+            if (Enumerable.Range(basePort, 7).Append(basePort + (int)EInboundProtocol.speedtest).All(p => !used.Contains(p)))
+            {
+                return basePort;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Moves the local (mixed socks+http) port and restarts the core.</summary>
+    public async Task ChangeLocalPortAsync(int port)
+    {
+        Config.Inbound.First().LocalPort = port;
+        AppManager.Instance.Reset();
+        await ConfigHandler.SaveConfig(Config);
+        LogBus.Notice(Loc.T($"Local port changed to {port}", $"Локальный порт изменён на {port}"));
+        await ReloadAsync();
+    }
+
+    private static async Task<bool> PortAnswersAsync(int port)
+    {
+        try
+        {
+            using var client = new System.Net.Sockets.TcpClient();
+            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+            await client.ConnectAsync(Global.Loopback, port, cts.Token);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>true/false on Linux (a child process runs config.json / configPre.json), null elsewhere.</summary>
@@ -244,7 +302,20 @@ public sealed class ProxyController
         await ReloadAsync();
     }
 
-    /// <summary>Real delay through the running proxy (v2rayN's "test current server").</summary>
+    /// <summary>Exit IP / country of the running proxy (last check), or null.</summary>
+    public GeoInfo? ExitGeo { get; private set; }
+
+    /// <summary>Country the active server's name claims (last check), or null.</summary>
+    public string? ExpectedCountry { get; private set; }
+
+    public bool CountryMismatch => ExitGeo != null && ExpectedCountry != null && ExitGeo.Country != ExpectedCountry;
+
+    private int _checkGeneration;
+
+    /// <summary>
+    /// Connection check of the running proxy: real delay, then exit IP and its country, compared with the
+    /// country the server name claims (flag / code / name). Runs after every (re)connect and on demand.
+    /// </summary>
     public async Task CheckAvailabilityAsync()
     {
         if (!CoreRunning)
@@ -256,25 +327,74 @@ public sealed class ProxyController
         {
             return;
         }
+        // A newer check (server switched meanwhile) wins.
+        var generation = Interlocked.Increment(ref _checkGeneration);
+        ExitGeo = null;
+        ExpectedCountry = GeoIp.ExpectedCountry(item.Remarks);
         AvailabilityText = ResUI.Speedtesting;
         StateChanged?.Invoke();
 
-        var result = await ConnectionHandler.RunAvailabilityCheck();
-        var ip = result.GetValidIp();
-        if (ip.IsNotEmpty())
+        var proxy = new WebProxy($"socks5://{Global.Loopback}:{AppManager.Instance.GetLocalPort(EInboundProtocol.socks)}");
+        var delay = -1;
+        for (var i = 0; i < 2 && delay <= 0; i++)
         {
-            ProfileExManager.Instance.SetTestIpInfo(item.IndexId, ip);
+            delay = await ConnectionHandler.GetRealPingTime(proxy);
+            if (delay <= 0)
+            {
+                await Task.Delay(500);
+            }
         }
-        if (result.Time > 0)
+        GeoInfo? geo = null;
+        if (delay > 0 && AppHost.Settings.CheckCountryOnConnect)
         {
-            ProfileExManager.Instance.SetTestDelay(item.IndexId, result.Time);
+            // Through a separate core without routing rules: a bypass rule must not hide the server's exit.
+            geo = await TestService.Instance.ProbeGeoAsync(item);
         }
-        TestService.Instance.Publish(new TestUpdate(item.IndexId,
-            Delay: result.Time > 0 ? result.Time : null,
-            IpInfo: ip.IsNotEmpty() ? ip : null));
+        if (generation != Volatile.Read(ref _checkGeneration))
+        {
+            return;
+        }
 
-        AvailabilityText = string.Format(ResUI.TestMeOutput, result.Time, result.Ip);
-        LogBus.Write(AvailabilityText);
+        string? ipText = null;
+        if (delay > 0)
+        {
+            ProfileExManager.Instance.SetTestDelay(item.IndexId, delay);
+        }
+        if (geo != null)
+        {
+            ipText = GeoIp.Format(geo, ExpectedCountry);
+            ProfileExManager.Instance.SetTestIpInfo(item.IndexId, ipText);
+        }
+        ExitGeo = geo;
+        TestService.Instance.Publish(new TestUpdate(item.IndexId, Delay: delay > 0 ? delay : null, IpInfo: ipText));
+
+        var sb = new StringBuilder();
+        sb.Append(delay > 0 ? $"{delay} {Loc.T("ms", "мс")}" : Loc.T("no connection", "нет соединения"));
+        if (geo != null)
+        {
+            sb.Append($" │ {geo.Country} {geo.CountryName} {geo.Ip}");
+            if (CountryMismatch)
+            {
+                sb.Append($" ⚠ {Loc.T("name says", "в названии")} {ExpectedCountry}");
+            }
+        }
+        else if (delay > 0 && AppHost.Settings.CheckCountryOnConnect)
+        {
+            sb.Append(" │ " + Loc.T("country: unknown", "страна: не определена"));
+        }
+        AvailabilityText = sb.ToString();
+
+        var summary = $"{item.Remarks}: {AvailabilityText}";
+        if (CountryMismatch)
+        {
+            LogBus.Notice(Loc.T(
+                $"⚠ {item.Remarks}: exit country {geo!.Country} ({geo.CountryName}), the name says {ExpectedCountry} ({GeoIp.CountryName(ExpectedCountry!)})",
+                $"⚠ {item.Remarks}: страна выхода {geo!.Country} ({geo.CountryName}), а в названии {ExpectedCountry} ({GeoIp.CountryName(ExpectedCountry!)})"));
+        }
+        else
+        {
+            LogBus.Write(summary);
+        }
         StateChanged?.Invoke();
     }
 

@@ -112,7 +112,8 @@ internal sealed partial class MainWindow : Runnable
 
         _subsList.ValueChanged += (_, e) =>
         {
-            if (_started && e.NewValue is int i)
+            // Rebuilding the list (Clear/Add) also raises this: only real user moves count.
+            if (_started && !_rebuildingSubs && e.NewValue is int i)
             {
                 OnSubSelected(i);
             }
@@ -222,6 +223,8 @@ internal sealed partial class MainWindow : Runnable
             _table.SetNeedsDraw();
         }
         UpdateStatusTexts();
+        ReloadIfServersChanged();
+        OfferFreePortIfNeeded();
         return true;
     }
 
@@ -236,6 +239,30 @@ internal sealed partial class MainWindow : Runnable
 
     private void MarkStateDirty() => _stateDirty = true;
 
+    private int? _portPrompted;
+
+    /// <summary>Offers a free local port once when another application holds ours.</summary>
+    private void OfferFreePortIfNeeded()
+    {
+        var busy = ProxyController.Instance.PortConflict;
+        if (busy is null || busy == _portPrompted || App?.TopRunnableView != this)
+        {
+            return;
+        }
+        _portPrompted = busy;
+        var free = ProxyController.SuggestFreeBasePort();
+        if (free is null)
+        {
+            return;
+        }
+        if (Dialogs.Confirm(App!, L("Port is busy", "Порт занят"),
+                L($"Local port {busy} is used by another application (v2rayN GUI?),\nso the TUI proxy cannot start.\n\nSwitch the TUI to port {free}? Apps that use the proxy must then use {free}.",
+                  $"Локальный порт {busy} занят другим приложением (GUI v2rayN?),\nпоэтому прокси TUI не запускается.\n\nПереключить TUI на порт {free}? Приложениям, использующим прокси, тогда нужен порт {free}.")))
+        {
+            Fire(() => ProxyController.Instance.ChangeLocalPortAsync(free.Value));
+        }
+    }
+
     private void OnJobChanged(TestJob job)
     {
         _stateDirty = true;
@@ -245,11 +272,26 @@ internal sealed partial class MainWindow : Runnable
         }
     }
 
-    private void OnServersChanged() => Fire(async () =>
+    private volatile bool _serversChanged;
+    private DateTime _serversReloadedAt;
+
+    // During a background cycle the list changes every few seconds: coalesce (see Tick).
+    private void OnServersChanged() => _serversChanged = true;
+
+    private void ReloadIfServersChanged()
     {
-        await LoadSubsAsync();
-        await ReloadServersAsync();
-    });
+        if (!_serversChanged || (DateTime.Now - _serversReloadedAt).TotalSeconds < 2)
+        {
+            return;
+        }
+        _serversChanged = false;
+        _serversReloadedAt = DateTime.Now;
+        Fire(async () =>
+        {
+            await LoadSubsAsync();
+            await ReloadServersAsync();
+        });
+    }
 
     private void OnTestUpdate(TestUpdate u)
     {
@@ -284,40 +326,71 @@ internal sealed partial class MainWindow : Runnable
 
     #region data
 
+    private bool _rebuildingSubs;
+
+    /// <summary>Subscription ids in list order ("" = all servers).</summary>
+    private List<string> _subIds = [];
+
     private async Task LoadSubsAsync()
     {
         var subs = await AppManager.Instance.SubItems() ?? [];
         var counts = (await AppManager.Instance.ProfileItems("") ?? [])
             .GroupBy(p => p.Subid ?? "")
             .ToDictionary(g => g.Key, g => g.Count());
+        var aliveId = AliveGroup.CurrentId;
         await OnUi(() =>
         {
-            _subs = subs;
-            _subsItems.Clear();
-            _subsItems.Add($"{L("All servers", "Все серверы"),-18}{counts.Values.Sum(),5}");
-            foreach (var s in subs)
+            string Line(string name, int count) => $"{(name.Length > 17 ? name[..16] + "…" : name),-18}{count,5}";
+
+            // The Alive group goes first; "All servers" does not include its copies.
+            var ordered = subs.Where(s => s.Id == aliveId).Concat(subs.Where(s => s.Id != aliveId)).ToList();
+            var ids = new List<string>();
+            var lines = new List<string>();
+            foreach (var s in ordered.Where(s => s.Id == aliveId))
             {
-                var name = (s.Id == AliveGroup.CurrentId ? "★ " : s.Enabled ? "" : "·") + s.Remarks;
-                if (name.Length > 17)
-                {
-                    name = name[..16] + "…";
-                }
-                _subsItems.Add($"{name,-18}{counts.GetValueOrDefault(s.Id ?? "", 0),5}");
+                ids.Add(s.Id);
+                lines.Add(Line("★ " + s.Remarks, counts.GetValueOrDefault(s.Id, 0)));
             }
-            var idx = Config.SubIndexId.IsNullOrEmpty() ? 0 : subs.FindIndex(s => s.Id == Config.SubIndexId) + 1;
-            if (idx <= 0)
+            ids.Add("");
+            lines.Add(Line(L("All servers", "Все серверы"), counts.Where(kv => kv.Key != aliveId).Sum(kv => kv.Value)));
+            foreach (var s in ordered.Where(s => s.Id != aliveId))
             {
-                idx = 0;
+                ids.Add(s.Id);
+                lines.Add(Line((s.Enabled ? "" : "·") + s.Remarks, counts.GetValueOrDefault(s.Id ?? "", 0)));
+            }
+
+            var current = Config.SubIndexId ?? "";
+            if (!ids.Contains(current))
+            {
+                current = "";
                 Config.SubIndexId = "";
             }
-            _subsList.SelectedItem = idx;
+            _rebuildingSubs = true;
+            try
+            {
+                _subs = subs;
+                _subIds = ids;
+                if (!_subsItems.SequenceEqual(lines))
+                {
+                    _subsItems.Clear();
+                    foreach (var l in lines)
+                    {
+                        _subsItems.Add(l);
+                    }
+                }
+                _subsList.SelectedItem = ids.IndexOf(current);
+            }
+            finally
+            {
+                _rebuildingSubs = false;
+            }
             return true;
         });
     }
 
     private void OnSubSelected(int index)
     {
-        var id = index <= 0 || index > _subs.Count ? "" : _subs[index - 1].Id;
+        var id = index >= 0 && index < _subIds.Count ? _subIds[index] : "";
         if (id == (Config.SubIndexId ?? ""))
         {
             return;

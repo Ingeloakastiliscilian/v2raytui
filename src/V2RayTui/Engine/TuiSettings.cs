@@ -47,11 +47,17 @@ public sealed class TuiSettings
     /// </summary>
     public int BackgroundSpeedConcurrency { get; set; } = 1;
 
+    /// <summary>Duration of one background speed test, seconds (the max speed seen is taken).</summary>
+    public int BackgroundSpeedTestSeconds { get; set; } = 6;
+
     /// <summary>In PingThenSpeed mode: how many fastest alive servers get a download test (0 = all alive).</summary>
     public int SpeedTopN { get; set; } = 10;
 
     /// <summary>Query exit IP / country for alive servers.</summary>
     public bool QueryIpInfo { get; set; }
+
+    /// <summary>After connecting: find the exit IP and its country and compare it with the server name.</summary>
+    public bool CheckCountryOnConnect { get; set; } = true;
 
     /// <summary>Re-sort the list by test results after a manual test finishes.</summary>
     public bool SortAfterTest { get; set; }
@@ -159,6 +165,7 @@ public sealed class TuiSettings
         PingConcurrency = Math.Clamp(PingConcurrency, 1, 1024);
         SpeedConcurrency = Math.Clamp(SpeedConcurrency, 1, 32);
         BackgroundSpeedConcurrency = Math.Clamp(BackgroundSpeedConcurrency, 1, 32);
+        BackgroundSpeedTestSeconds = Math.Clamp(BackgroundSpeedTestSeconds, 3, 60);
         SpeedTopN = Math.Max(0, SpeedTopN);
         BackgroundIntervalMinutes = Math.Clamp(BackgroundIntervalMinutes, 1, 7 * 24 * 60);
         SwitchThresholdPercent = Math.Clamp(SwitchThresholdPercent, 0, 95);

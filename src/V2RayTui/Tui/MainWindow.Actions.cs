@@ -236,6 +236,10 @@ internal sealed partial class MainWindow
             case 'w':
                 CopyProxyEnv();
                 return true;
+            case 'n':
+                // Re-check the current connection: delay, exit IP, country vs server name.
+                Fire(ProxyController.Instance.CheckAvailabilityAsync);
+                return true;
         }
         return false;
     }
@@ -399,14 +403,26 @@ internal sealed partial class MainWindow
 
     private void RemoveDuplicates()
     {
-        if (!Dialogs.Confirm(App!, L("Duplicates", "Дубликаты"), L("Remove duplicate servers in this group?", "Удалить дубликаты серверов в этой группе?")))
+        if (!Dialogs.Confirm(App!, L("Duplicates", "Дубликаты"), L("Remove duplicate servers in this list?", "Удалить дубликаты серверов в этом списке?")))
         {
             return;
         }
         Fire(async () =>
         {
-            var (removed, left) = await ConfigHandler.DedupServerList(Config, Config.SubIndexId);
-            LogBus.Notice(string.Format(ResUI.RemoveDuplicateServerResult, removed, left));
+            // On this list only (so "All servers" never touches the Alive group); same server = same share link.
+            var rows = await ServerRepository.LoadAsync(Config.SubIndexId, "");
+            var profiles = await ServerRepository.ToProfilesAsync(rows);
+            var remove = profiles
+                .Where(p => !p.ConfigType.IsComplexType())
+                .GroupBy(AliveGroup.Key)
+                .SelectMany(g => g.Skip(1))
+                .Where(p => p.IndexId != Config.IndexId)
+                .ToList();
+            if (remove.Count > 0)
+            {
+                await ConfigHandler.RemoveServers(Config, remove);
+            }
+            LogBus.Notice(string.Format(ResUI.RemoveDuplicateServerResult, profiles.Count, profiles.Count - remove.Count));
             await LoadSubsAsync();
             await ReloadServersAsync();
         });
@@ -415,14 +431,19 @@ internal sealed partial class MainWindow
     private void RemoveInvalid()
     {
         if (!Dialogs.Confirm(App!, L("Failed servers", "Нерабочие серверы"),
-                L("Delete all servers whose last test failed?", "Удалить все серверы, не прошедшие последний тест?")))
+                L("Delete the servers of this list whose last test failed?", "Удалить серверы этого списка, не прошедшие последний тест?")))
         {
             return;
         }
         Fire(async () =>
         {
-            var count = await ConfigHandler.RemoveInvalidServerResult(Config, Config.SubIndexId);
-            LogBus.Notice(string.Format(ResUI.RemoveInvalidServerResultTip, Math.Max(0, count)));
+            var rows = await ServerRepository.LoadAsync(Config.SubIndexId, "");
+            var failed = rows.Where(r => r.Delay < 0 && !r.ConfigType.IsComplexType() && r.IndexId != Config.IndexId).ToList();
+            if (failed.Count > 0)
+            {
+                await ConfigHandler.RemoveServers(Config, await ServerRepository.ToProfilesAsync(failed));
+            }
+            LogBus.Notice(string.Format(ResUI.RemoveInvalidServerResultTip, failed.Count));
             await LoadSubsAsync();
             await ReloadServersAsync();
         });
@@ -957,7 +978,8 @@ Import                                    Subscriptions (left pane, Tab to switc
 Proxy                                     Other
   F5 restart core     F6 stop core          F2  settings             l  log size
   F3 system proxy     F4 routing rules      F8  update cores / geo   w  copy proxy env vars
-  F7 TUN (sudo)                             q F10  quit / keep running in background
+  F7 TUN (sudo)                             n   check connection: delay, exit IP, country vs name
+                                            q F10  quit / keep running in background
 
 Hotkeys also work with the Russian keyboard layout.
 """;
@@ -986,7 +1008,8 @@ Hotkeys also work with the Russian keyboard layout.
 Прокси                                    Прочее
   F5 перезапуск ядра  F6 остановить ядро    F2  настройки            l  размер журнала
   F3 системный прокси F4 правила маршрутов  F8  обновить ядра / geo  w  скопировать переменные прокси
-  F7 TUN (sudo)                             q F10  выход / оставить работать в фоне
+  F7 TUN (sudo)                             n   проверить подключение: задержка, IP, страна vs название
+                                            q F10  выход / оставить работать в фоне
 
 Горячие клавиши работают и в русской раскладке.
 """;

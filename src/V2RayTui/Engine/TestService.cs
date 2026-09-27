@@ -27,6 +27,27 @@ public sealed class TestJob
 
     /// <summary>Extra per-job cap on simultaneous speed tests (on top of the global one), or null.</summary>
     internal AsyncLimiter? SpeedLimiter { get; init; }
+
+    /// <summary>
+    /// PingThenSpeed: called (from worker threads) when a server's result is final — right after its ping
+    /// if it is dead or not speed-tested, otherwise after its speed test. Args: index id, delay, speed.
+    /// </summary>
+    public Action<string, int, decimal>? OnItemFinished { get; init; }
+
+    /// <summary>Speed test duration for this job, seconds (null = v2rayN's SpeedTestTimeout).</summary>
+    public int? SpeedSeconds { get; init; }
+
+    internal void Finish(string id)
+    {
+        try
+        {
+            OnItemFinished?.Invoke(id, Delays.GetValueOrDefault(id, -1), Speeds.GetValueOrDefault(id, 0));
+        }
+        catch
+        {
+            // a listener must not break the test
+        }
+    }
     public DateTime Started { get; } = DateTime.Now;
     public DateTime? Finished { get; internal set; }
     public CancellationTokenSource Cts { get; } = new();
@@ -127,7 +148,8 @@ public sealed class TestService
         _speedSlots.Limit = s.SpeedConcurrency;
     }
 
-    public TestJob Start(string title, TestMode mode, IReadOnlyList<ProfileItem> items, bool background, int? speedTopN = null)
+    public TestJob Start(string title, TestMode mode, IReadOnlyList<ProfileItem> items, bool background, int? speedTopN = null,
+        Action<string, int, decimal>? onItemFinished = null, int? speedSeconds = null)
     {
         ApplySettings(AppHost.Settings);
         var job = new TestJob
@@ -137,6 +159,8 @@ public sealed class TestService
             Background = background,
             SpeedTopN = speedTopN,
             SpeedLimiter = background ? new AsyncLimiter(AppHost.Settings.BackgroundSpeedConcurrency) : null,
+            OnItemFinished = onItemFinished,
+            SpeedSeconds = speedSeconds,
         };
         lock (_jobsGate)
         {
@@ -220,12 +244,19 @@ public sealed class TestService
                     {
                         pending.TryAdd(p.IndexId, 0);
                     }
+                    // Dead servers and those left out of the speed phase are final already.
+                    var topIds = top.Select(p => p.IndexId).ToHashSet();
+                    foreach (var p in testable.Where(p => !topIds.Contains(p.IndexId)))
+                    {
+                        job.Finish(p.IndexId);
+                    }
                     job.StartPhase("speed", top.Count);
                     await RunCoreBatchesAsync(job, top, async (it, c) =>
                     {
                         await SpeedItemAsync(job, it, c);
                         pending.TryRemove(it.IndexId, out _);
                         job.ItemDone(null);
+                        job.Finish(it.IndexId);
                     }, pending, ct);
                     break;
             }
@@ -495,6 +526,57 @@ public sealed class TestService
 
     #region probes
 
+    /// <summary>
+    /// Exit IP / country of one server through its own temporary core. Unlike the main proxy port, this
+    /// has no routing rules, so the answer is the server's real exit (not "direct" by a bypass rule).
+    /// </summary>
+    public async Task<GeoInfo?> ProbeGeoAsync(ProfileItem profile, CancellationToken ct = default)
+    {
+        var item = new ServerTestItem
+        {
+            IndexId = profile.IndexId,
+            Address = profile.Address,
+            Port = profile.Port,
+            ConfigType = profile.ConfigType,
+            Profile = profile,
+            CoreType = AppManager.Instance.GetCoreType(profile, profile.ConfigType),
+        };
+        ProcessService? proc = null;
+        await _coreStartGate.WaitAsync(ct);
+        try
+        {
+            proc = await CoreManager.Instance.LoadCoreConfigSpeedtest(item);
+            if (proc != null)
+            {
+                await WaitForListenersAsync(proc, [item], ct);
+            }
+        }
+        finally
+        {
+            _coreStartGate.Release();
+        }
+        if (proc == null || proc.HasExited)
+        {
+            return null;
+        }
+        try
+        {
+            return await GeoIp.LookupAsync(new WebProxy($"socks5://{Global.Loopback}:{item.Port}"), ct);
+        }
+        finally
+        {
+            try
+            {
+                await proc.StopAsync();
+                proc.Dispose();
+            }
+            catch
+            {
+                // ignored
+            }
+        }
+    }
+
     private async Task<int> PingItemAsync(TestJob job, ServerTestItem it, ConcurrentDictionary<string, byte> pending,
         CancellationToken ct, bool countDone = true)
     {
@@ -514,8 +596,8 @@ public sealed class TestService
             {
                 using (await _pingSlots.AcquireAsync(ct))
                 {
-                    var ip = await ConnectionHandler.GetIPInfo(proxy, ct);
-                    var ipStr = ip?.ToString() ?? Global.None;
+                    var geo = await GeoIp.LookupAsync(proxy, ct);
+                    var ipStr = geo is null ? Global.None : GeoIp.Format(geo, GeoIp.ExpectedCountry(it.Profile?.Remarks));
                     ProfileExManager.Instance.SetTestIpInfo(it.IndexId, ipStr);
                     Report(new TestUpdate(it.IndexId, IpInfo: ipStr));
                 }
@@ -546,7 +628,7 @@ public sealed class TestService
             Report(new TestUpdate(it.IndexId, SpeedStatus: ResUI.Speedtesting));
             var proxy = new WebProxy($"socks5://{Global.Loopback}:{it.Port}");
             var cfg = AppHost.Config.SpeedTestItem;
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(3, cfg.SpeedTestTimeout)));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(3, job.SpeedSeconds ?? cfg.SpeedTestTimeout)));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
 
             decimal best = 0;

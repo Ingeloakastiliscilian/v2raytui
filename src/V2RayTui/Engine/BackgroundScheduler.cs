@@ -169,14 +169,36 @@ public sealed class BackgroundScheduler
             }
 
             var title = Loc.T("background", "фон") + (subId.IsNullOrEmpty() ? "" : $" [{(await AppManager.Instance.GetSubItem(subId))?.Remarks}]");
-            // Alive needs a speed for every server that answers the ping.
+            // Alive needs a speed for every server that answers the ping; the group is updated as results come.
+            // Each distinct server is tested once (subscriptions often repeat servers under other names),
+            // its result is copied to the duplicates.
+            AliveSession? session = null;
+            if (aliveOn)
+            {
+                var activeId = AppHost.Config.IndexId;
+                var toTest = items
+                    .GroupBy(AliveGroup.Key)
+                    .Select(g => g.FirstOrDefault(p => p.IndexId == activeId) ?? g.First())
+                    .ToList();
+                session = await AliveSession.StartAsync(items, toTest);
+                if (toTest.Count < items.Count)
+                {
+                    LogBus.Write("[bg] " + Loc.T($"{items.Count} servers, {toTest.Count} distinct", $"серверов {items.Count}, различных {toTest.Count}"));
+                }
+                items = toTest;
+            }
             CurrentJob = aliveOn
-                ? TestService.Instance.Start(title, TestMode.PingThenSpeed, items, background: true, speedTopN: 0)
-                : TestService.Instance.Start(title, S.BackgroundMode, items, background: true);
+                ? TestService.Instance.Start(title, TestMode.PingThenSpeed, items, background: true, speedTopN: 0,
+                    onItemFinished: session!.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds)
+                : TestService.Instance.Start(title, S.BackgroundMode, items, background: true, speedSeconds: S.BackgroundSpeedTestSeconds);
             Changed?.Invoke();
             using (ct.Register(() => CurrentJob?.Cts.Cancel()))
             {
                 await CurrentJob.Completion;
+            }
+            if (session != null)
+            {
+                await session.DrainAsync();
             }
             LastResult = CurrentJob.ProgressText;
 

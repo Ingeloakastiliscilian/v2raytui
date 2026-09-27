@@ -259,7 +259,8 @@ internal static class SettingsDialogs
         var speeds = f.Number(L("Parallel speed tests (manual)", "Параллельных замеров скорости (вручную)"), s.SpeedConcurrency);
         var bgSpeeds = f.Number(L("Speed tests at once (background)", "Замеров скорости одновременно (фон)"), s.BackgroundSpeedConcurrency);
         var top = f.Number(L("Speed test top-N (0 = all)", "Скорость для топ-N (0 = всех)"), s.SpeedTopN);
-        var ip = f.Check(L("Query exit IP / country", "Определять выходной IP / страну"), s.QueryIpInfo);
+        var ip = f.Check(L("Tests: query exit IP / country", "Тесты: определять выходной IP / страну"), s.QueryIpInfo);
+        var geoOnConnect = f.Check(L("On connect: check IP / country vs name", "При подключении: сверять IP / страну с названием"), s.CheckCountryOnConnect);
         var sort = f.Check(L("Sort list after a test", "Сортировать список после теста"), s.SortAfterTest);
         var coreOut = f.Check(L("Show core output in log", "Показывать вывод ядра в журнале"), s.ShowCoreOutput);
 
@@ -287,6 +288,7 @@ internal static class SettingsDialogs
         s.BackgroundSpeedConcurrency = Form.Int(bgSpeeds, s.BackgroundSpeedConcurrency);
         s.SpeedTopN = Form.Int(top, s.SpeedTopN);
         s.QueryIpInfo = Form.Bool(ip);
+        s.CheckCountryOnConnect = Form.Bool(geoOnConnect);
         s.SortAfterTest = Form.Bool(sort);
         s.ShowCoreOutput = Form.Bool(coreOut);
         s.BackgroundEnabled = Form.Bool(bgOn);
@@ -309,8 +311,8 @@ internal static class SettingsDialogs
         var logLevels = new List<string> { "debug", "info", "warning", "error", "none" };
 
         using var f = new Form(L("Local proxy", "Локальный прокси"), 30);
-        var port = f.Number(L("Mixed (socks+http) port", "Порт mixed (socks+http)"), inbound.LocalPort);
-        var second = f.Check(L("Second local port (+1)", "Второй локальный порт (+1)"), inbound.SecondLocalPortEnabled);
+        var port = f.Number(L("Local port (socks+http)", "Локальный порт (socks+http)"), inbound.LocalPort);
+        var second = f.Check(L("Also open an extra port = local port + 1", "Дополнительно открыть порт = локальный + 1"), inbound.SecondLocalPortEnabled);
         var lan = f.Check(L("Allow LAN connections", "Разрешить подключения из LAN"), inbound.AllowLANConn);
         var lanPort = f.Check(L("Separate port for LAN", "Отдельный порт для LAN"), inbound.NewPort4LAN);
         var user = f.Text(L("LAN auth user", "LAN: пользователь"), inbound.User);
@@ -321,7 +323,9 @@ internal static class SettingsDialogs
         var logLevel = f.Picker(L("Core log level", "Уровень лога ядра"), logLevels, Math.Max(0, logLevels.IndexOf(config.CoreBasicItem.Loglevel)));
         var coreLog = f.Check(L("Write core access/error logs", "Писать логи ядра в файлы"), config.CoreBasicItem.LogEnabled);
         var except = f.Text(L("System proxy exceptions", "Исключения системного прокси"), config.SystemProxyItem.SystemProxyExceptions);
-        f.Note(L("Other v2rayN options live in guiConfigs/guiNConfig.json (edit while the TUI is closed).",
+        f.Note(L("The core also uses local port +1…+6 and +21 and up (tests). Next to v2rayN GUI use e.g. 10908.\n" +
+                 "Other v2rayN options live in guiConfigs/guiNConfig.json (edit while the TUI is closed).",
+                 "Ядро занимает также порты локальный+1…+6 и от +21 (тесты). Рядом с GUI v2rayN берите, например, 10908.\n" +
                  "Остальные опции v2rayN — в guiConfigs/guiNConfig.json (редактируйте при закрытом TUI)."));
 
         if (!f.Run(app))
@@ -355,18 +359,19 @@ internal static class SettingsDialogs
         var maxDelay = f.Number(L("Max delay, ms (0 = any)", "Макс. задержка, мс (0 = любая)"), s.AliveMaxDelay);
         var interval = f.Number(L("Re-test every, minutes", "Перепроверять каждые, минут"), s.BackgroundIntervalMinutes);
         var speeds = f.Number(L("Speed tests at once", "Замеров скорости одновременно"), s.BackgroundSpeedConcurrency);
+        var speedSec = f.Number(L("One speed test, seconds", "Длительность замера, секунд"), s.BackgroundSpeedTestSeconds);
         var subLimit = f.Number(L("Subscriptions: not more often, min", "Подписки: не чаще, мин"), s.SubUpdateMinIntervalMinutes);
         var sw = f.Options(L("Auto switch (off by default)", "Автопереключение (по умолч. выкл.)"), s.AutoSwitch);
         f.Note(L(
             "Each background cycle: update subscriptions (if due) → ping every server → measure the speed\n" +
             "of every server that answered → rebuild the group (add new, drop dead/slow, keep the rest).\n" +
             "Subscription updates never touch the group. 1 speed test at a time = accurate, but a cycle\n" +
-            "takes ≈ alive servers × speed test timeout; the next cycle starts after the previous one ends.\n" +
+            "takes ≈ distinct alive servers × test duration; the next cycle starts after the previous one ends.\n" +
             "Auto switch Off: the active server is never changed, even if it drops out (it stays in the group).",
             "Каждый фоновый цикл: обновить подписки (если пора) → пинг всех серверов → скорость всех\n" +
             "ответивших → пересобрать группу (новые добавить, мёртвые/медленные убрать, остальные не трогать).\n" +
             "Обновление подписок группу не затрагивает. 1 замер за раз — точно, но цикл длится примерно\n" +
-            "«живые серверы × таймаут замера»; следующий цикл начинается после окончания предыдущего.\n" +
+            "«различные живые серверы × длительность замера»; следующий начинается после окончания предыдущего.\n" +
             "Автопереключение выкл.: активный сервер не меняется, даже если выбыл (он остаётся в группе)."));
 
         static decimal? ParseSpeed(string text) =>
@@ -383,6 +388,7 @@ internal static class SettingsDialogs
         s.AliveMaxDelay = Form.Int(maxDelay, s.AliveMaxDelay);
         s.BackgroundIntervalMinutes = Form.Int(interval, s.BackgroundIntervalMinutes);
         s.BackgroundSpeedConcurrency = Form.Int(speeds, s.BackgroundSpeedConcurrency);
+        s.BackgroundSpeedTestSeconds = Form.Int(speedSec, s.BackgroundSpeedTestSeconds);
         s.SubUpdateMinIntervalMinutes = Form.Int(subLimit, s.SubUpdateMinIntervalMinutes);
         s.AutoSwitch = sw.Value ?? s.AutoSwitch;
         if (s.AliveEnabled)
