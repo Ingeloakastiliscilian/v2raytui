@@ -501,7 +501,9 @@ public sealed class ProxyController
         {
             return false;
         }
-        if (await RunSudoAsync(["-n", "-l", core], null) == 0)
+        // -k: ignore cached credentials. Without it a password typed a few minutes ago (sudo keeps it
+        // ~15 min) looks like a passwordless rule, and later core starts/stops fail once it expires.
+        if (await RunSudoAsync(["-n", "-k", "-l", core], null) == 0)
         {
             AppManager.Instance.LinuxSudoPwd = "nopasswd";
             LogBus.Write(Loc.T("sudo without password is allowed for the TUN core", "sudo без пароля разрешён для ядра TUN"));

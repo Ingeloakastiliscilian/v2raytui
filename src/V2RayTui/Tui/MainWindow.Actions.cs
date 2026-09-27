@@ -788,7 +788,15 @@ internal sealed partial class MainWindow
 
     private void ToggleTun()
     {
-        var enable = !Config.TunModeItem.EnableTun;
+        // "TUN ⚠" (on in settings, but not running for lack of sudo): F7 activates it rather than turning it off.
+        var activate = Config.TunModeItem.EnableTun && ProxyController.Instance.CoreRunning && !ProxyController.Instance.TunActive;
+        if (activate && ProxyController.Instance.ForeignTunPresent())
+        {
+            Dialogs.Error(App!, "TUN", L("singbox_tun is already up in another application (v2rayN GUI?). Close it or turn its TUN off first.",
+                "singbox_tun уже поднят другим приложением (GUI v2rayN?). Сначала закройте его или выключите там TUN."));
+            return;
+        }
+        var enable = activate || !Config.TunModeItem.EnableTun;
         string? pwd = null;
         if (enable && !Utils.IsWindows() && !ProxyController.TunAllowed && !Task.Run(ProxyController.TryPasswordlessSudoAsync).GetAwaiter().GetResult())
         {
@@ -798,7 +806,13 @@ internal sealed partial class MainWindow
                 return;
             }
         }
-        Fire(() => ProxyController.Instance.SetTunAsync(enable, pwd));
+        Fire(async () =>
+        {
+            if (await ProxyController.Instance.SetTunAsync(enable, pwd) && activate && !ProxyController.Instance.CoreRunning)
+            {
+                await ProxyController.Instance.ReloadAsync();
+            }
+        });
     }
 
     private void UpdatesMenu()

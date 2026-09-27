@@ -19,6 +19,15 @@ public sealed class BackgroundScheduler
     public DateTime? LastRun { get; private set; }
     public TestJob? CurrentJob { get; private set; }
     public string LastResult { get; private set; } = "";
+
+    /// <summary>What the running cycle is doing now ("" when idle).</summary>
+    public string Stage { get; private set; } = "";
+
+    private void SetStage(string stage)
+    {
+        Stage = stage;
+        Changed?.Invoke();
+    }
     public bool IsRunning => _runGate.CurrentCount == 0;
 
     /// <summary>Raised (from any thread) when schedule or state changes.</summary>
@@ -164,6 +173,7 @@ public sealed class BackgroundScheduler
             if ((S.UpdateSubsBeforeTest || aliveOn) && !skipUpdate)
             {
                 LogBus.Write("[bg] " + Loc.T("updating subscriptions", "обновление подписок"));
+                SetStage(Loc.T("updating subscriptions", "обновление подписок"));
                 // Rate-limited: subscriptions updated less than an hour ago are skipped, tests still run.
                 await ProxyController.Instance.UpdateSubscriptionsAsync(subId, viaProxy: true);
             }
@@ -202,6 +212,7 @@ public sealed class BackgroundScheduler
                 }
                 items = toTest;
             }
+            SetStage(Loc.T("testing", "проверка серверов"));
             CurrentJob = aliveOn
                 ? TestService.Instance.Start(title, TestMode.PingThenSpeed, items, background: true, speedTopN: 0,
                     onItemFinished: session!.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds)
@@ -219,6 +230,7 @@ public sealed class BackgroundScheduler
                 if (!CurrentJob.Cancelled && session.AnyQualified && session.BeginRetry() is { Count: > 0 } retry)
                 {
                     LogBus.Write("[alive] " + Loc.T($"re-checking {retry.Count} that failed once", $"перепроверка {retry.Count} не прошедших с первого раза"));
+                    SetStage(Loc.T("re-check", "перепроверка"));
                     var first = CurrentJob;
                     var second = TestService.Instance.Start(title + Loc.T(": re-check", ": перепроверка"), TestMode.PingThenSpeed, retry, background: true,
                         speedTopN: 0, onItemFinished: session.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds);
@@ -249,6 +261,7 @@ public sealed class BackgroundScheduler
             {
                 if (aliveOn)
                 {
+                    SetStage(Loc.T("rebuilding Alive", "пересборка Alive"));
                     var r = await AliveGroup.SyncAsync(CurrentJob, items);
                     LastResult += $" │ {S.AliveName}: {r.Total}";
                 }
@@ -257,6 +270,7 @@ public sealed class BackgroundScheduler
         }
         finally
         {
+            Stage = "";
             _runGate.Release();
             Changed?.Invoke();
         }

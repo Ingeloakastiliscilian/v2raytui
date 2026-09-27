@@ -615,24 +615,34 @@ internal sealed partial class MainWindow : Runnable
     {
         var segs = new List<SegmentBar.Segment> { new(" ", Theme.A(Theme.Text)) };
         var bg = BackgroundScheduler.Instance;
+        var st = AppHost.Settings;
         var bgJob = TestService.Instance.RunningJobs.FirstOrDefault(j => j.Background);
-        if (bgJob != null)
+        if (bg.IsRunning)
         {
-            segs.Add(new($"⟳ {L("background", "фон")} ", Theme.A(Theme.Blue, null, TextStyle.Bold)));
-            segs.Add(new($"{Theme.Bar(bgJob.PhaseDone, Math.Max(1, bgJob.PhaseTotal), 12)} {bgJob.Phase} {bgJob.PhaseDone}/{bgJob.PhaseTotal}", Theme.A(Theme.Blue)));
-            segs.Add(new($"  ✓{bgJob.Alive} ✗{bgJob.Failed}", Theme.A(Theme.Sub)));
+            segs.Add(new($"⟳ {L("Background", "Фон")}: ", Theme.A(Theme.Blue, null, TextStyle.Bold)));
+            if (bgJob != null)
+            {
+                segs.Add(new($"{bg.Stage} · {Phase(bgJob.Phase)} {Theme.Bar(bgJob.PhaseDone, Math.Max(1, bgJob.PhaseTotal), 12)} {bgJob.PhaseDone}/{bgJob.PhaseTotal}", Theme.A(Theme.Blue)));
+                segs.Add(new($"  ✓{bgJob.Alive} ✗{bgJob.Failed}", Theme.A(Theme.Sub)));
+            }
+            else
+            {
+                segs.Add(new(bg.Stage.IsNotEmpty() ? bg.Stage + "…" : "…", Theme.A(Theme.Blue)));
+            }
         }
-        else if (AppHost.Settings.BackgroundEnabled)
+        else if (st.BackgroundEnabled)
         {
-            segs.Add(new($"◷ {L("next cycle", "след. цикл")} {(bg.NextRun is { } next ? next.ToString("HH:mm") : "…")}", Theme.A(Theme.Sub)));
+            segs.Add(new($"● {L("Background", "Фон")}: {L("on", "вкл")}", Theme.A(Theme.Green, null, TextStyle.Bold)));
+            segs.Add(new($" · {L("every", "каждые")} {st.BackgroundIntervalMinutes} {L("min", "мин")} · {L("next", "след.")} {(bg.NextRun is { } next ? next.ToString("HH:mm") : "…")}", Theme.A(Theme.Sub)));
             if (bg.LastRun is { } last)
             {
-                segs.Add(new($"  ({L("last", "посл.")} {last:HH:mm})", Theme.A(Theme.Dim)));
+                segs.Add(new($" · {L("last", "посл.")} {last:HH:mm}: {bg.LastResult}", Theme.A(Theme.Dim)));
             }
         }
         else
         {
-            segs.Add(new($"◌ {L("background off", "фон выкл")}", Theme.A(Theme.Dim)));
+            segs.Add(new($"○ {L("Background", "Фон")}: {L("off", "выкл")} ", Theme.A(Theme.Dim, null, TextStyle.Bold)));
+            segs.Add(new(L("(b — turn on)", "(b — включить)"), Theme.A(Theme.Dim)));
         }
         if (AppHost.Settings.AliveEnabled)
         {
@@ -651,6 +661,13 @@ internal sealed partial class MainWindow : Runnable
     }
 
     private int _aliveCount;
+
+    private static string Phase(string phase) => phase switch
+    {
+        "ping" => L("ping", "пинг"),
+        "speed" => L("speed", "скорость"),
+        _ => phase,
+    };
 
     private string _routingName = "";
 
