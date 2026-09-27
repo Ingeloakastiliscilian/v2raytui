@@ -56,27 +56,28 @@ public sealed class ProxyController
 
             // TUN is wanted (saved setting) but sudo is not available in this session: start without it,
             // keeping the setting, so the next start with a password brings TUN back.
+            // The build uses a copy of the config: the shared file (used by v2rayN GUI too) stays as it is.
             var tunWanted = Config.TunModeItem.EnableTun;
             var foreignTun = tunWanted && ForeignTunPresent();
             var tunSuppressed = tunWanted && (!TunAllowed || foreignTun);
             if (tunSuppressed)
             {
-                Config.TunModeItem.EnableTun = false;
                 LogBus.Notice(foreignTun
                     ? Loc.T("TUN interface singbox_tun is already up in another application (v2rayN GUI?) — close it or turn its TUN off; starting without TUN",
                         "TUN-интерфейс singbox_tun уже поднят другим приложением (GUI v2rayN?) — закройте его или выключите там TUN; запуск без TUN")
                     : Loc.T("TUN is on but no sudo access in this session — starting without TUN",
                         "TUN включён, но в этом сеансе нет доступа sudo — запуск без TUN"));
             }
-            CoreConfigContextBuilderAllResult all;
-            try
+            var buildConfig = JsonUtils.DeepCopy(Config)!;
+            buildConfig.TunModeItem.EnableTun = tunWanted && !tunSuppressed;
+            if (AppHost.Settings.TunViaSingBox)
             {
-                all = await CoreConfigContextBuilder.BuildAll(Config, profile);
+                buildConfig.TunModeItem.EnableLegacyProtect = true;
             }
-            finally
-            {
-                Config.TunModeItem.EnableTun = tunWanted;
-            }
+            var all = await CoreConfigContextBuilder.BuildAll(buildConfig, profile);
+            _tunInterface = all.PreSocksResult?.Context.IsTunEnabled == true || all.MainResult.Context.RunCoreType == ECoreType.sing_box
+                ? "singbox_tun"
+                : "xray_tun";
             TunActive = tunWanted && !tunSuppressed;
             if (NoticeManager.Instance.NotifyValidatorResult(all.CombinedValidatorResult) && !all.Success)
             {
@@ -111,6 +112,10 @@ public sealed class ProxyController
             }
             PortConflict = null;
             await SysProxyHandler.UpdateSysProxy(Config, false);
+            if (TunActive)
+            {
+                await CheckTunUpAsync();
+            }
             StateChanged?.Invoke();
 
             _ = Task.Run(async () =>
@@ -383,6 +388,14 @@ public sealed class ProxyController
                 await Task.Delay(500);
             }
         }
+        if (TunActive && TunUp == true)
+        {
+            // Without the proxy port: this is what every app sees when TUN works.
+            SystemExitGeo = await GeoIp.LookupAsync(null);
+            LogBus.Write(SystemExitGeo is { } sys
+                ? Loc.T($"TUN: system traffic exits via {sys.Country} {sys.CountryName} {sys.Ip}", $"TUN: трафик системы выходит через {sys.Country} {sys.CountryName} {sys.Ip}")
+                : Loc.T("TUN: system traffic has no internet access", "TUN: у трафика системы нет доступа в интернет"));
+        }
         GeoInfo? geo = null;
         if (delay > 0 && AppHost.Settings.CheckCountryOnConnect)
         {
@@ -483,6 +496,35 @@ public sealed class ProxyController
     public bool ForeignTunPresent() =>
         OperatingSystem.IsLinux() && Directory.Exists("/sys/class/net/singbox_tun") && !(TunActive && CoreRunning);
 
+    private string _tunInterface = "singbox_tun";
+
+    /// <summary>Last verdict about TUN after a start: null = unknown / not used.</summary>
+    public bool? TunUp { get; private set; }
+
+    /// <summary>Exit of traffic that does not use the proxy port (i.e. goes through TUN), or null.</summary>
+    public GeoInfo? SystemExitGeo { get; private set; }
+
+    private async Task CheckTunUpAsync()
+    {
+        TunUp = null;
+        SystemExitGeo = null;
+        var dev = $"/sys/class/net/{_tunInterface}";
+        for (var i = 0; i < 25 && !Directory.Exists(dev); i++)
+        {
+            await Task.Delay(200);
+        }
+        TunUp = !OperatingSystem.IsLinux() || Directory.Exists(dev);
+        if (TunUp == true)
+        {
+            LogBus.Write(Loc.T($"TUN: interface {_tunInterface} is up", $"TUN: интерфейс {_tunInterface} поднят"));
+        }
+        else
+        {
+            LogBus.Notice(Loc.T($"TUN: interface {_tunInterface} did not come up — core output is in guiLogs/tui-*.log; an outdated core? (F8)",
+                $"TUN: интерфейс {_tunInterface} не поднялся — вывод ядра в guiLogs/tui-*.log; устаревшее ядро? (F8)"));
+        }
+    }
+
     /// <summary>TUN is part of the running configuration.</summary>
     public bool TunActive { get; private set; }
 
@@ -503,7 +545,9 @@ public sealed class ProxyController
         }
         // -k: ignore cached credentials. Without it a password typed a few minutes ago (sudo keeps it
         // ~15 min) looks like a passwordless rule, and later core starts/stops fail once it expires.
-        if (await RunSudoAsync(["-n", "-k", "-l", core], null) == 0)
+        var rc = await RunSudoAsync(["-n", "-k", "-l", core], null);
+        LogBus.WriteFileOnly($"[tun] passwordless sudo check for {core}: exit {rc}");
+        if (rc == 0)
         {
             AppManager.Instance.LinuxSudoPwd = "nopasswd";
             LogBus.Write(Loc.T("sudo without password is allowed for the TUN core", "sudo без пароля разрешён для ядра TUN"));
@@ -515,7 +559,11 @@ public sealed class ProxyController
     /// <summary>Checks a sudo password (`sudo -k -S -v`) and keeps it in memory for this session.</summary>
     public static async Task<bool> UseSudoPasswordAsync(string password)
     {
-        if (await RunSudoAsync(["-k", "-S", "-p", "", "-v"], password) != 0)
+        var rc = await RunSudoAsync(["-k", "-S", "-p", "", "-v"], password);
+        LogBus.Write(rc == 0
+            ? Loc.T("sudo password accepted", "Пароль sudo принят")
+            : Loc.T($"sudo password rejected (exit {rc})", $"Пароль sudo не принят (код {rc})"));
+        if (rc != 0)
         {
             return false;
         }

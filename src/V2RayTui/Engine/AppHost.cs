@@ -96,6 +96,7 @@ public static class AppHost
         CultureInfo.DefaultThreadCurrentUICulture = new CultureInfo(Config.UiItem.CurrentLanguage);
 
         AppManager.Instance.InitComponents();
+        LogBus.EnableFile(Utils.GetLogPath());
         Settings = TuiSettings.Load();
         LogBus.KeepCoreOutput = Settings.ShowCoreOutput;
 
@@ -174,6 +175,10 @@ public static class AppHost
         else if (LogBus.KeepCoreOutput || !LooksLikeCoreOutput(msg))
         {
             LogBus.Write(msg);
+        }
+        else
+        {
+            LogBus.WriteFileOnly("[core] " + msg);
         }
         return Task.CompletedTask;
     }

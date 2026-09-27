@@ -22,6 +22,38 @@ public static class LogBus
     /// <summary>When false, core process output (very chatty during speed tests) is dropped.</summary>
     public static bool KeepCoreOutput { get; set; } = true;
 
+    private static readonly Lock _fileGate = new();
+    private static string? _filePath;
+
+    /// <summary>Persist every line (and core output) to guiLogs/tui-YYYY-MM-DD.log for diagnostics.</summary>
+    public static void EnableFile(string logDir)
+    {
+        _filePath = Path.Combine(logDir, $"tui-{DateTime.Now:yyyy-MM-dd}.log");
+        WriteFileOnly($"==== v2rayn-tui {Environment.ProcessId} start ====");
+    }
+
+    /// <summary>Only to the file (core output that is not shown on screen).</summary>
+    public static void WriteFileOnly(string? message)
+    {
+        if (_filePath is null || string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+        try
+        {
+            var stamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            var text = string.Concat(message.Replace("\r", "").Split('\n').Where(l => l.Length > 0).Select(l => $"{stamp} {l}\n"));
+            lock (_fileGate)
+            {
+                File.AppendAllText(_filePath, text);
+            }
+        }
+        catch
+        {
+            // diagnostics must never break the app
+        }
+    }
+
     public static void Write(string? message)
     {
         if (string.IsNullOrWhiteSpace(message))
@@ -37,6 +69,7 @@ public static class LogBus
                 continue;
             }
             var line = $"{stamp} {raw}";
+            WriteFileOnly(raw);
             lock (_gate)
             {
                 _lines.Enqueue(line);

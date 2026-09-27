@@ -215,6 +215,7 @@ internal sealed partial class MainWindow : Runnable
             }
         }
 
+        CoreUpdater.WarnOutdatedCores();
         await EnsureTunAccessAsync();
         if (_rows.Count > 0 || await ConfigHandler.GetDefaultServer(Config) != null)
         {
@@ -603,9 +604,10 @@ internal sealed partial class MainWindow : Runnable
         {
             new($"⇄ :{AppManager.Instance.GetLocalPort(EInboundProtocol.socks)}{(inbound.AllowLANConn ? " LAN" : "")}  ", Theme.A(Theme.Sub)),
             new($"{L("sysproxy", "сист.прокси")}: {sys}  ", Theme.A(Theme.Sub)),
-            tunNoAccess
+            tunNoAccess || (pc.TunActive && pc.TunUp == false)
                 ? new(" TUN ⚠ ", Theme.A(Theme.Crust, Theme.Peach, TextStyle.Bold))
-                : new(tun ? " TUN " : "TUN ", tun ? Theme.A(Theme.Crust, Theme.Teal, TextStyle.Bold) : Theme.A(Theme.Dim)),
+                : new(tun ? $" TUN{(pc.SystemExitGeo is { } sysGeo ? " ⇢ " + GeoIp.Flag(sysGeo.Country) : "")} " : "TUN ",
+                    tun ? Theme.A(Theme.Crust, Theme.Teal, TextStyle.Bold) : Theme.A(Theme.Dim)),
             new($"  ⤳ {_routingName} ", Theme.A(Theme.Sub)),
         };
         _header.Set(left, right);

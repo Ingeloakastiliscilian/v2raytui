@@ -11,6 +11,48 @@ public static class CoreUpdater
         return info?.CoreExes?.Any(name => File.Exists(Utils.GetBinPath(Utils.GetExeName(name), type.ToString()))) == true;
     }
 
+    /// <summary>Oldest core versions the bundled engine (v2rayN 7.25) generates configs for.</summary>
+    private static readonly Dictionary<ECoreType, Version> MinVersions = new()
+    {
+        [ECoreType.sing_box] = new Version(1, 14, 0), // 7.25 writes dns.rules[].preferred_by
+        [ECoreType.Xray] = new Version(26, 1, 0),
+    };
+
+    public static Version? InstalledVersion(ECoreType type)
+    {
+        var info = CoreInfoManager.Instance.GetCoreInfo(type);
+        var exe = CoreInfoManager.Instance.GetCoreExecFile(info, out _);
+        if (exe.IsNullOrEmpty() || !File.Exists(exe))
+        {
+            return null;
+        }
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo(exe, "version") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false })!;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+            var m = System.Text.RegularExpressions.Regex.Match(output, @"(\d+)\.(\d+)\.(\d+)");
+            return m.Success ? new Version(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value)) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Warns about cores too old for the engine's configs (typical when data is shared with an older v2rayN).</summary>
+    public static void WarnOutdatedCores()
+    {
+        foreach (var (type, min) in MinVersions)
+        {
+            if (InstalledVersion(type) is { } v && v < min)
+            {
+                LogBus.Notice(Loc.T($"{type} {v} is too old for this engine (needs ≥ {min}): update it — F8 or `v2rayn-tui core update`",
+                    $"{type} {v} слишком старое для этого движка (нужно ≥ {min}): обновите — F8 или `v2rayn-tui core update`"));
+            }
+        }
+    }
+
     public static bool GeoFilesPresent =>
         File.Exists(Utils.GetBinPath("geosite.dat")) && File.Exists(Utils.GetBinPath("geoip.dat"));
 

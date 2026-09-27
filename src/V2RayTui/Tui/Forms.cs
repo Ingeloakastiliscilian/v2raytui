@@ -322,6 +322,7 @@ internal static class SettingsDialogs
         var sniff = f.Check(L("Sniffing", "Sniffing"), inbound.SniffingEnabled);
         var routeOnly = f.Check(L("Sniffing: route only", "Sniffing: только маршрутизация"), inbound.RouteOnly);
         var logLevel = f.Picker(L("Core log level", "Уровень лога ядра"), logLevels, Math.Max(0, logLevels.IndexOf(config.CoreBasicItem.Loglevel)));
+        var tunSingBox = f.Check(L("TUN via sing-box (as v2rayN GUI ≤ 7.20)", "TUN через sing-box (как GUI v2rayN ≤ 7.20)"), AppHost.Settings.TunViaSingBox);
         var coreLog = f.Check(L("Write core access/error logs", "Писать логи ядра в файлы"), config.CoreBasicItem.LogEnabled);
         var except = f.Text(L("System proxy exceptions", "Исключения системного прокси"), config.SystemProxyItem.SystemProxyExceptions);
         f.Note(L("The core also uses local port +1…+6 and +21 and up (tests). Next to v2rayN GUI use e.g. 10908.\n" +
@@ -344,6 +345,8 @@ internal static class SettingsDialogs
         inbound.RouteOnly = Form.Bool(routeOnly);
         config.CoreBasicItem.Loglevel = logLevels[logLevel()];
         config.CoreBasicItem.LogEnabled = Form.Bool(coreLog);
+        AppHost.Settings.TunViaSingBox = Form.Bool(tunSingBox);
+        AppHost.SaveSettings();
         config.SystemProxyItem.SystemProxyExceptions = except.Text.Trim();
         AppManager.Instance.Reset();
         _ = ConfigHandler.SaveConfig(config);

@@ -87,6 +87,15 @@ public sealed class TuiSettings
     /// <summary>Restrict auto switching to servers of this subscription; empty = any server tested.</summary>
     public string AutoSwitchSubId { get; set; } = "";
 
+    // --- TUN ---
+
+    /// <summary>
+    /// Run TUN in a sing-box pre-core (like v2rayN ≤ 7.20, per-app rules work) instead of Xray's own TUN,
+    /// which the 7.25 engine picks when the shared config has EnableLegacyProtect = false.
+    /// Applied at build time only; the shared config is not changed.
+    /// </summary>
+    public bool TunViaSingBox { get; set; } = true;
+
     // --- subscriptions ---
 
     /// <summary>

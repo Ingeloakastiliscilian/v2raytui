@@ -7,7 +7,7 @@
     <Nullable>annotations</Nullable>
     <AssemblyName>v2rayn-tui</AssemblyName>
     <RootNamespace>V2RayTui</RootNamespace>
-    <Version>0.2.1</Version>
+    <Version>0.2.2</Version>
     <!-- Release override. Not -p:Version: a global Version would also re-version ServiceLib, whose version
          goes into the "v2rayN/x.y.z" User-Agent used to download subscriptions. -->
     <Version Condition="'$(TuiVersion)' != ''">$(TuiVersion)</Version>
