@@ -18,6 +18,7 @@ internal sealed partial class MainWindow : Runnable
     private readonly ListView _subsList;
     private readonly FrameView _serversFrame;
     private readonly TableView _table;
+    private readonly Label _emptyLabel;
     private readonly FrameView _logFrame;
     private readonly ListView _logList;
     private readonly SegmentBar _statusLine;
@@ -91,7 +92,16 @@ internal sealed partial class MainWindow : Runnable
             Width = Dim.Fill(),
             Height = Dim.Fill(Dim.Func(_ => _logHeight + 2)),
         };
-        _serversFrame.Add(_table);
+        _emptyLabel = new Label
+        {
+            X = Pos.Center(),
+            Y = Pos.Center(),
+            Width = Dim.Percent(80),
+            TextAlignment = Alignment.Center,
+            Visible = false,
+        };
+        _emptyLabel.SetScheme(Theme.Base with { Normal = Theme.A(Theme.Dim) });
+        _serversFrame.Add(_table, _emptyLabel);
         Theme.Panel(_serversFrame);
 
         _logList = new ListView { Width = Dim.Fill(), Height = Dim.Fill() };
@@ -179,9 +189,52 @@ internal sealed partial class MainWindow : Runnable
         App!.Keyboard.KeyDown += OnGlobalKey;
         App!.Paste += OnPaste;
         App!.AddTimeout(TimeSpan.FromMilliseconds(250), Tick);
+        SuppressKittyKeyboardProtocol();
 
         _table.SetFocus();
         Fire(StartupAsync);
+    }
+
+    /// <summary>
+    /// Terminal.Gui asks Kitty-protocol terminals (TERM=xterm-kitty, WezTerm, Ghostty, foot…) to report
+    /// every keystroke — including a bare Ctrl/Shift/Alt press — as its own escape sequence. This build's
+    /// parser does not fully round-trip that: a lone modifier key then shows up as garbage on screen and
+    /// desyncs the input reader until the app is restarted. Popping the just-pushed flags (CSI &lt; u)
+    /// turns it back into plain legacy key sequences, which parse correctly.
+    /// Sent twice (fast local terminals resolve support in well under 300ms; a slower link may take longer)
+    /// — a pop with nothing pushed is a no-op, so the second call is harmless when the first already worked.
+    /// </summary>
+    private void SuppressKittyKeyboardProtocol()
+    {
+        // Only where Terminal.Gui would actually negotiate the protocol in the first place: on a plain
+        // terminal it never sends the enable sequence, so there is nothing of ours to pop — and some
+        // terminals are not fully ECMA-48-compliant about discarding a CSI final byte they don't
+        // recognize, so sending this blind is not free everywhere.
+        var term = Environment.GetEnvironmentVariable("TERM") ?? "";
+        var termProgram = Environment.GetEnvironmentVariable("TERM_PROGRAM") ?? "";
+        var isKittyProtocolTerminal = term.Contains("kitty", StringComparison.OrdinalIgnoreCase)
+            || termProgram.Equals("WezTerm", StringComparison.OrdinalIgnoreCase)
+            || termProgram.Equals("ghostty", StringComparison.OrdinalIgnoreCase)
+            || term.Equals("foot", StringComparison.OrdinalIgnoreCase)
+            || term.Contains("contour", StringComparison.OrdinalIgnoreCase);
+        if (!OperatingSystem.IsLinux() || !isKittyProtocolTerminal)
+        {
+            return;
+        }
+        void Send()
+        {
+            try
+            {
+                Console.Out.Write("\u001b[<u");
+                Console.Out.Flush();
+            }
+            catch
+            {
+                // no real terminal on the other end
+            }
+        }
+        App!.AddTimeout(TimeSpan.FromMilliseconds(300), () => { Send(); return false; });
+        App!.AddTimeout(TimeSpan.FromMilliseconds(1500), () => { Send(); return false; });
     }
 
     protected override void Dispose(bool disposing)
@@ -521,9 +574,26 @@ internal sealed partial class MainWindow : Runnable
                 _table.EnsureCursorIsVisible();
             }
             UpdateServersTitle();
+            UpdateEmptyState();
             _table.Update();
             return true;
         });
+    }
+
+    private void UpdateEmptyState()
+    {
+        _emptyLabel.Visible = _rows.Count == 0;
+        if (!_emptyLabel.Visible)
+        {
+            return;
+        }
+        _emptyLabel.Text = _filter.IsNotEmpty()
+            ? L($"No servers match \"{_filter}\".\nPress / to clear the filter.", $"Нет серверов по фильтру «{_filter}».\nНажмите /, чтобы очистить.")
+            : CurrentSub != null
+                ? L("This subscription has no servers yet.\nu — update it, or a in Subscriptions to add another.",
+                    "В этой подписке пока нет серверов.\nu — обновить, или a в Подписках — добавить другую.")
+                : L("No servers yet.\na in Subscriptions — add one, p — paste share links.",
+                    "Серверов пока нет.\na в Подписках — добавить, p — вставить ссылки.");
     }
 
     private void UpdateServersTitle()
@@ -575,7 +645,7 @@ internal sealed partial class MainWindow : Runnable
         var pc = ProxyController.Instance;
         var left = new List<SegmentBar.Segment>
         {
-            new(" ◆ v2rayN TUI ", Theme.A(Theme.Crust, Theme.Mauve, TextStyle.Bold)),
+            new($" ◆ v2rayN TUI {AppHost.Version} ", Theme.A(Theme.Crust, Theme.Mauve, TextStyle.Bold)),
             new(" ", Theme.A(Theme.Text)),
         };
         if (pc.CoreRunning)

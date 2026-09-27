@@ -22,7 +22,7 @@ internal sealed class ServerTableSource(IReadOnlyList<ServerRow> rows) : ITableS
         " ",
         "IP",
         Loc.T("Name", "Имя"),
-        Loc.T("Proto", "Протокол"),
+        Loc.T("Type", "Тип"),
         Loc.T("Address", "Адрес"),
         Loc.T("Transport", "Транспорт"),
         Loc.T("Subscription", "Подписка"),
@@ -48,7 +48,7 @@ internal sealed class ServerTableSource(IReadOnlyList<ServerRow> rows) : ITableS
             var r = Rows[row];
             return col switch
             {
-                ColMark => r.IsActive ? "▶" : r.Marked ? "✓" : " ",
+                ColMark => r switch { { IsActive: true, Marked: true } => "◆", { IsActive: true } => "▶", { Marked: true } => "✓", _ => " " },
                 // Only the flag of the exit country; the full IP is in the details (i).
                 ColIp => GeoIp.Flag(GeoIp.CountryFromIpInfo(r.IpInfo)),
                 ColName => r.Remarks,
