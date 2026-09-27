@@ -14,8 +14,6 @@ public static class CliApp
         {
             Loc.IsRu = lang.StartsWith("ru", StringComparison.OrdinalIgnoreCase);
         }
-        AppHost.PrepareEnvironment(args.Has("--portable"), args.Get("--data") ?? Environment.GetEnvironmentVariable("V2RAYN_TUI_DATA"));
-
         var cmd = args.Pos(0)?.ToLowerInvariant() ?? "tui";
         if (args.Has("--version") || cmd is "version")
         {
@@ -27,7 +25,7 @@ public static class CliApp
             PrintHelp();
             return 0;
         }
-
+        AppHost.PrepareEnvironment(args.Has("--portable"), args.Get("--data") ?? Environment.GetEnvironmentVariable("V2RAYN_TUI_DATA"));
         try
         {
             return cmd switch
