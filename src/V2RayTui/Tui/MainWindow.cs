@@ -140,14 +140,17 @@ internal sealed partial class MainWindow : Runnable
         var statusBar = new StatusBar();
         statusBar.SetScheme(Theme.ShortcutBar);
         statusBar.Add(
+            // Only the function keys (like mc); letter keys are in F1.
             Hint("F1", L("Help", "Справка")),
-            Hint("Enter", L("Connect", "Подключить")),
-            Hint("r/t/s/m", L("Test", "Тест")),
-            Hint("Esc", L("Stop", "Стоп")),
-            Hint("u/U", L("Update subs", "Обновить подписки")),
-            Hint("/", L("Filter", "Фильтр")),
             Hint("F2", L("Settings", "Настройки")),
-            Hint("q", L("Quit", "Выход")));
+            Hint("F3", L("Sys proxy", "Сист.прокси")),
+            Hint("F4", L("Routing", "Маршруты")),
+            Hint("F5", L("Restart", "Перезапуск")),
+            Hint("F6", L("Stop core", "Стоп ядра")),
+            Hint("F7", "TUN"),
+            Hint("F8", L("Updates", "Обновления")),
+            Hint("F9", L("Bg test", "Фон.тест")),
+            Hint("F10", L("Quit", "Выход")));
 
         Add(_header, _subsFrame, _serversFrame, _logFrame, _statusLine, statusBar);
 
