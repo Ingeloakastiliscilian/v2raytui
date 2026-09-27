@@ -523,7 +523,7 @@ internal sealed partial class MainWindow
                     using var gen = new QRCodeGenerator();
                     using var data = gen.CreateQrCode(url, QRCodeGenerator.ECCLevel.L);
                     sb.AppendLine();
-                    sb.Append(new AsciiQRCode(data).GetGraphicSmall(drawQuietZones: true, invert: false, endOfLine: "\n"));
+                    sb.Append(new AsciiQRCode(data).GetGraphicSmall(drawQuietZones: true, invert: true, endOfLine: "\n"));
                 }
                 catch (Exception ex)
                 {

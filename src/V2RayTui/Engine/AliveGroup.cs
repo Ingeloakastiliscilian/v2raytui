@@ -91,6 +91,61 @@ public static class AliveGroup
         return copy;
     }
 
+    /// <summary>
+    /// Adds servers that passed the threshold in a manual test (the background cycle is the only one
+    /// that removes). Keeps the group as fresh as the latest measurement, whoever made it.
+    /// </summary>
+    public static async Task AddFromTestAsync(TestJob job)
+    {
+        if (CurrentId is not { } groupId || job.Cancelled || job.Speeds.IsEmpty)
+        {
+            return;
+        }
+        var existing = (await AppManager.Instance.ProfileItems(groupId) ?? []).Select(Key).ToHashSet();
+        var added = 0;
+        foreach (var p in job.Items.Where(p => IsCandidate(p, groupId)))
+        {
+            var delay = job.Delays.GetValueOrDefault(p.IndexId);
+            var speed = job.Speeds.GetValueOrDefault(p.IndexId);
+            if (!Qualifies(delay, speed) || !existing.Add(Key(p)))
+            {
+                continue;
+            }
+            var copy = await AddCopyAsync(p, groupId);
+            ProfileExManager.Instance.SetTestDelay(copy.IndexId, delay);
+            ProfileExManager.Instance.SetTestSpeed(copy.IndexId, speed);
+            if (job.IpInfos.TryGetValue(p.IndexId, out var ip))
+            {
+                ProfileExManager.Instance.SetTestIpInfo(copy.IndexId, ip);
+            }
+            LogBus.Write($"[alive] + {copy.Remarks} ({speed} MB/s, {Loc.T("manual test", "ручной тест")})");
+            added++;
+        }
+        if (added > 0)
+        {
+            await ResortAsync();
+            await ProfileExManager.Instance.SaveTo();
+            ProxyController.Instance.NotifyServersChanged();
+        }
+    }
+
+    /// <summary>Keeps the group sorted by speed (fastest first), then by delay.</summary>
+    public static async Task ResortAsync()
+    {
+        if (CurrentId is not { } groupId)
+        {
+            return;
+        }
+        var ids = (await AppManager.Instance.ProfileItems(groupId) ?? []).Select(p => p.IndexId).ToHashSet();
+        var exs = (await ProfileExManager.Instance.GetProfileExs()).Where(e => ids.Contains(e.IndexId)).GroupBy(e => e.IndexId).Select(g => g.First());
+        var ordered = exs.OrderByDescending(e => e.Speed).ThenBy(e => e.Delay > 0 ? e.Delay : int.MaxValue).Select(e => e.IndexId).ToList();
+        ordered.AddRange(ids.Except(ordered));
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            ProfileExManager.Instance.SetSort(ordered[i], (i + 1) * 10);
+        }
+    }
+
     public sealed record SyncResult(int Total, int Added, int Removed, bool Skipped);
 
     /// <summary>Rebuilds the group from a finished ping+speed job over <paramref name="sources"/>.</summary>
@@ -145,6 +200,10 @@ public static class AliveGroup
                 added++;
             }
             order.Add((copy.IndexId, q.Delay, q.Speed));
+            if (job.IpInfos.TryGetValue(q.P.IndexId, out var ip) && ip.IsNotEmpty())
+            {
+                ProfileExManager.Instance.SetTestIpInfo(copy.IndexId, ip);
+            }
         }
 
         for (var i = 0; i < order.Count; i++)
@@ -220,6 +279,8 @@ public sealed class AliveSession
     private readonly Dictionary<string, decimal> _bestSpeed = new();
     private readonly Dictionary<string, ProfileItem> _copies = new();
     private readonly List<string> _deferredDrops = [];
+    private readonly HashSet<string> _retryKeys = [];
+    private bool _retrying;
     private readonly Lock _gate = new();
     private Task _chain = Task.CompletedTask;
     private bool _keptActiveNoticed;
@@ -288,21 +349,26 @@ public sealed class AliveSession
             _copies[key] = copy;
             ProfileExManager.Instance.SetTestDelay(copy.IndexId, best.Delay);
             ProfileExManager.Instance.SetTestSpeed(copy.IndexId, best.Speed);
+            if (best.IpInfo.IsNotEmpty())
+            {
+                ProfileExManager.Instance.SetTestIpInfo(copy.IndexId, best.IpInfo);
+            }
             added++;
         }
         if (added > 0)
         {
+            await AliveGroup.ResortAsync();
             LogBus.Write("[alive] " + Loc.T($"+{added} from the last results (re-checked in this cycle)", $"+{added} по последним замерам (перепроверяются в этом цикле)"));
             ProxyController.Instance.NotifyServersChanged();
         }
     }
 
     /// <summary>Called from test worker threads; work is serialized.</summary>
-    public void OnItemFinished(string indexId, int delay, decimal speed)
+    public void OnItemFinished(string indexId, int delay, decimal speed, string? ipInfo)
     {
         lock (_gate)
         {
-            _chain = _chain.ContinueWith(_ => HandleAsync(indexId, delay, speed), TaskScheduler.Default).Unwrap();
+            _chain = _chain.ContinueWith(_ => HandleAsync(indexId, delay, speed, ipInfo), TaskScheduler.Default).Unwrap();
         }
     }
 
@@ -314,7 +380,7 @@ public sealed class AliveSession
         }
     }
 
-    private async Task HandleAsync(string indexId, int delay, decimal speed)
+    private async Task HandleAsync(string indexId, int delay, decimal speed, string? ipInfo)
     {
         try
         {
@@ -332,7 +398,11 @@ public sealed class AliveSession
                 {
                     ProfileExManager.Instance.SetTestSpeed(dup, speed);
                 }
-                TestService.Instance.Publish(new TestUpdate(dup, Delay: delay, Speed: speed > 0 ? speed : null, DelayStatus: "", SpeedStatus: ""));
+                if (ipInfo.IsNotEmpty())
+                {
+                    ProfileExManager.Instance.SetTestIpInfo(dup, ipInfo);
+                }
+                TestService.Instance.Publish(new TestUpdate(dup, Delay: delay, Speed: speed > 0 ? speed : null, DelayStatus: "", SpeedStatus: "", IpInfo: ipInfo));
             }
             // Survive a restart in the middle of a long cycle.
             if (++_handled % 5 == 0)
@@ -355,7 +425,12 @@ public sealed class AliveSession
                 }
                 ProfileExManager.Instance.SetTestDelay(copy.IndexId, delay);
                 ProfileExManager.Instance.SetTestSpeed(copy.IndexId, _bestSpeed[key]);
-                TestService.Instance.Publish(new TestUpdate(copy.IndexId, Delay: delay, Speed: _bestSpeed[key], DelayStatus: "", SpeedStatus: ""));
+                if (ipInfo.IsNotEmpty())
+                {
+                    ProfileExManager.Instance.SetTestIpInfo(copy.IndexId, ipInfo);
+                }
+                TestService.Instance.Publish(new TestUpdate(copy.IndexId, Delay: delay, Speed: _bestSpeed[key], DelayStatus: "", SpeedStatus: "", IpInfo: ipInfo));
+                await AliveGroup.ResortAsync();
                 if (first)
                 {
                     // The network works: now it is safe to drop what failed so far.
@@ -369,10 +444,15 @@ public sealed class AliveSession
                 return;
             }
 
-            // Drop the server once every copy of it has been tested and none passed.
+            // Drop the server once every copy of it has been tested and none passed —
+            // but a server of the group first gets a second check at the end of the cycle.
             if (_pending[key] <= 0 && !_bestSpeed.ContainsKey(key) && _copies.ContainsKey(key))
             {
-                if (_bestSpeed.Count == 0)
+                if (!_retrying)
+                {
+                    _retryKeys.Add(key);
+                }
+                else if (_bestSpeed.Count == 0)
                 {
                     _deferredDrops.Add(key);
                 }
@@ -388,6 +468,29 @@ public sealed class AliveSession
             Logging.SaveLog("AliveSession", ex);
             LogBus.Write($"[alive] {ex.Message}");
         }
+    }
+
+    /// <summary>At least one server passed in this cycle (so our own network works).</summary>
+    public bool AnyQualified => _bestSpeed.Count > 0;
+
+    /// <summary>
+    /// Switches the session to the second-check pass and returns one server per group member that
+    /// failed the first pass. Failing again removes it.
+    /// </summary>
+    public List<ProfileItem> BeginRetry()
+    {
+        _retrying = true;
+        var items = new List<ProfileItem>();
+        foreach (var key in _retryKeys.Where(k => !_bestSpeed.ContainsKey(k)))
+        {
+            var id = _sourcesOfKey[key].FirstOrDefault(i => _sources.ContainsKey(i));
+            if (id != null)
+            {
+                _pending[key] = 1;
+                items.Add(_sources[id]);
+            }
+        }
+        return items;
     }
 
     private async Task DropAsync(string key)

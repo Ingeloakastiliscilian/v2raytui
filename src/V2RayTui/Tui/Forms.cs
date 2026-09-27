@@ -1,4 +1,5 @@
 using Terminal.Gui.App;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
@@ -22,7 +23,7 @@ internal sealed class Form : IDisposable
     {
         _labelWidth = labelWidth;
         _width = width;
-        _dlg = new Dialog { Title = title, Width = width, Height = 6 };
+        _dlg = new Dialog { BorderStyle = LineStyle.Rounded, Title = title, Width = width, Height = 6 };
     }
 
     public void Section(string title)

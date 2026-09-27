@@ -19,6 +19,9 @@ public sealed class TestJob
     private int _failed;
 
     public required string Title { get; init; }
+
+    /// <summary>The servers this job tests.</summary>
+    public IReadOnlyList<ProfileItem> Items { get; init; } = [];
     public required TestMode Mode { get; init; }
     public bool Background { get; init; }
 
@@ -32,7 +35,13 @@ public sealed class TestJob
     /// PingThenSpeed: called (from worker threads) when a server's result is final — right after its ping
     /// if it is dead or not speed-tested, otherwise after its speed test. Args: index id, delay, speed.
     /// </summary>
-    public Action<string, int, decimal>? OnItemFinished { get; init; }
+    public Action<string, int, decimal, string?>? OnItemFinished { get; init; }
+
+    /// <summary>Exit IP / country per server ("NL 1.2.3.4", "none"), when looked up.</summary>
+    public ConcurrentDictionary<string, string> IpInfos { get; } = new();
+
+    /// <summary>Look up exit IP / country for alive servers regardless of the setting (Alive cycles).</summary>
+    public bool ForceIpInfo { get; init; }
 
     /// <summary>Speed test duration for this job, seconds (null = v2rayN's SpeedTestTimeout).</summary>
     public int? SpeedSeconds { get; init; }
@@ -41,7 +50,7 @@ public sealed class TestJob
     {
         try
         {
-            OnItemFinished?.Invoke(id, Delays.GetValueOrDefault(id, -1), Speeds.GetValueOrDefault(id, 0));
+            OnItemFinished?.Invoke(id, Delays.GetValueOrDefault(id, -1), Speeds.GetValueOrDefault(id, 0), IpInfos.GetValueOrDefault(id));
         }
         catch
         {
@@ -149,17 +158,19 @@ public sealed class TestService
     }
 
     public TestJob Start(string title, TestMode mode, IReadOnlyList<ProfileItem> items, bool background, int? speedTopN = null,
-        Action<string, int, decimal>? onItemFinished = null, int? speedSeconds = null)
+        Action<string, int, decimal, string?>? onItemFinished = null, int? speedSeconds = null)
     {
         ApplySettings(AppHost.Settings);
         var job = new TestJob
         {
             Title = title,
+            Items = items,
             Mode = mode,
             Background = background,
             SpeedTopN = speedTopN,
             SpeedLimiter = background ? new AsyncLimiter(AppHost.Settings.BackgroundSpeedConcurrency) : null,
             OnItemFinished = onItemFinished,
+            ForceIpInfo = onItemFinished != null,
             SpeedSeconds = speedSeconds,
         };
         lock (_jobsGate)
@@ -590,7 +601,7 @@ public sealed class TestService
         job.Delays[it.IndexId] = ms;
         Report(new TestUpdate(it.IndexId, Delay: ms, DelayStatus: ""));
 
-        if (ms > 0 && AppHost.Settings.QueryIpInfo)
+        if (ms > 0 && (AppHost.Settings.QueryIpInfo || job.ForceIpInfo))
         {
             try
             {
@@ -598,6 +609,7 @@ public sealed class TestService
                 {
                     var geo = await GeoIp.LookupAsync(proxy, ct);
                     var ipStr = geo is null ? Global.None : GeoIp.Format(geo, GeoIp.ExpectedCountry(it.Profile?.Remarks));
+                    job.IpInfos[it.IndexId] = ipStr;
                     ProfileExManager.Instance.SetTestIpInfo(it.IndexId, ipStr);
                     Report(new TestUpdate(it.IndexId, IpInfo: ipStr));
                 }

@@ -6,33 +6,36 @@ namespace V2RayTui.Tui;
 internal sealed class ServerTableSource(IReadOnlyList<ServerRow> rows) : ITableSource
 {
     public const int ColMark = 0;
-    public const int ColType = 1;
+    public const int ColIp = 1;
     public const int ColName = 2;
-    public const int ColAddress = 3;
-    public const int ColTransport = 4;
-    public const int ColSub = 5;
-    public const int ColDelay = 6;
-    public const int ColSpeed = 7;
-    public const int ColIp = 8;
+    public const int ColType = 3;
+    public const int ColAddress = 4;
+    public const int ColTransport = 5;
+    public const int ColSub = 6;
+    public const int ColDelay = 7;
+    public const int ColSpeed = 8;
 
     public IReadOnlyList<ServerRow> Rows { get; } = rows;
 
     public string[] ColumnNames { get; } =
     [
         " ",
-        Loc.T("Type", "Тип"),
+        "IP",
         Loc.T("Name", "Имя"),
+        Loc.T("Proto", "Протокол"),
         Loc.T("Address", "Адрес"),
         Loc.T("Transport", "Транспорт"),
         Loc.T("Subscription", "Подписка"),
         Loc.T("Delay", "Задержка"),
-        Loc.T("Speed", "Скорость"),
-        "IP",
+        Loc.T("Speed, MB/s", "Скорость, МБ/с"),
     ];
 
     public int Columns => ColumnNames.Length;
 
     int ITableSource.Rows => Rows.Count;
+
+    /// <summary>Largest speed in the list — the scale of the speed bars.</summary>
+    public decimal MaxSpeed => Rows.Count == 0 ? 0 : Rows.Max(r => r.Speed);
 
     public object this[int row, int col]
     {
@@ -45,9 +48,11 @@ internal sealed class ServerTableSource(IReadOnlyList<ServerRow> rows) : ITableS
             var r = Rows[row];
             return col switch
             {
-                ColMark => (r.IsActive ? "▶" : " ") + (r.Marked ? "✓" : " "),
-                ColType => r.TypeName,
+                ColMark => r.IsActive ? "▶" : r.Marked ? "✓" : " ",
+                // Only the flag of the exit country; the full IP is in the details (i).
+                ColIp => GeoIp.Flag(GeoIp.CountryFromIpInfo(r.IpInfo)),
                 ColName => r.Remarks,
+                ColType => Theme.ProtocolShort(r.ConfigType),
                 ColAddress => r.Endpoint,
                 ColTransport => r.Transport,
                 ColSub => r.SubRemarks,
@@ -57,8 +62,7 @@ internal sealed class ServerTableSource(IReadOnlyList<ServerRow> rows) : ITableS
                     < 0 => "✗",
                     _ => "",
                 },
-                ColSpeed => r.SpeedStatus.IsNotEmpty() ? r.SpeedStatus : r.Speed > 0 ? $"{r.Speed:0.0} MB/s" : "",
-                ColIp => r.IpInfo,
+                ColSpeed => r.SpeedStatus.IsNotEmpty() ? r.SpeedStatus : r.Speed > 0 ? $"{Theme.Bar(r.Speed, MaxSpeed)} {r.Speed,5:0.0}" : "",
                 _ => "",
             };
         }

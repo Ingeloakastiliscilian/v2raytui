@@ -129,6 +129,33 @@ public static partial class GeoIp
     public static string Format(GeoInfo geo, string? expected) =>
         expected != null && expected != geo.Country ? $"{geo.Country} {geo.Ip} ≠{expected}" : $"{geo.Country} {geo.Ip}";
 
+    /// <summary>Flag emoji of an ISO country code ("NL" → 🇳🇱), or "" when not a code.</summary>
+    public static string Flag(string? code)
+    {
+        if (code is not { Length: 2 } || !code.All(char.IsAsciiLetter))
+        {
+            return "";
+        }
+        code = code.ToUpperInvariant();
+        return char.ConvertFromUtf32(0x1F1E6 + code[0] - 'A') + char.ConvertFromUtf32(0x1F1E6 + code[1] - 'A');
+    }
+
+    [GeneratedRegex(@"(?<![A-Za-z])([A-Z]{2})(?![A-Za-z])")]
+    private static partial Regex IpInfoCode();
+
+    /// <summary>Country code from a stored IP info: ours "NL 1.2.3.4 ≠DE" or v2rayN's "🇳🇱(NL) 1.2.3.4".</summary>
+    public static string? CountryFromIpInfo(string? ipInfo)
+    {
+        if (ipInfo.IsNullOrEmpty() || ipInfo == Global.None)
+        {
+            return null;
+        }
+        var m = IpInfoCode().Match(ipInfo);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    public static bool IpInfoMismatch(string? ipInfo) => ipInfo?.Contains('≠') == true;
+
     #region country claimed in the server name
 
     private static readonly Lazy<(Dictionary<string, string> Names, HashSet<string> Codes)> _regions = new(BuildRegions);

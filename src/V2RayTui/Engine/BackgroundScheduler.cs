@@ -34,6 +34,7 @@ public sealed class BackgroundScheduler
         }
         _cts = new CancellationTokenSource();
         AppHost.SubscriptionsUpdated += OnSubscriptionsUpdated;
+        TestService.Instance.JobChanged += OnJobChanged;
         Reschedule();
         _loop = Task.Run(() => LoopAsync(_cts.Token));
     }
@@ -41,6 +42,7 @@ public sealed class BackgroundScheduler
     public async Task StopAsync()
     {
         AppHost.SubscriptionsUpdated -= OnSubscriptionsUpdated;
+        TestService.Instance.JobChanged -= OnJobChanged;
         _cts?.Cancel();
         CurrentJob?.Cts.Cancel();
         if (_loop != null)
@@ -73,6 +75,14 @@ public sealed class BackgroundScheduler
     {
         _runRequested = true;
         _wake.Release();
+    }
+
+    private static void OnJobChanged(TestJob job)
+    {
+        if (!job.IsRunning && !job.Background && S.AliveEnabled)
+        {
+            _ = AliveGroup.AddFromTestAsync(job);
+        }
     }
 
     private void OnSubscriptionsUpdated(string msg)
@@ -199,6 +209,34 @@ public sealed class BackgroundScheduler
             if (session != null)
             {
                 await session.DrainAsync();
+                // Second check for group members that failed once (a single bad measurement must not
+                // throw a working server out); only when the network worked in this cycle.
+                if (!CurrentJob.Cancelled && session.AnyQualified && session.BeginRetry() is { Count: > 0 } retry)
+                {
+                    LogBus.Write("[alive] " + Loc.T($"re-checking {retry.Count} that failed once", $"перепроверка {retry.Count} не прошедших с первого раза"));
+                    var first = CurrentJob;
+                    var second = TestService.Instance.Start(title + Loc.T(": re-check", ": перепроверка"), TestMode.PingThenSpeed, retry, background: true,
+                        speedTopN: 0, onItemFinished: session.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds);
+                    using (ct.Register(() => second.Cts.Cancel()))
+                    {
+                        await second.Completion;
+                    }
+                    await session.DrainAsync();
+                    // The final reconciliation sees the second result.
+                    foreach (var p in retry)
+                    {
+                        first.Delays[p.IndexId] = second.Delays.GetValueOrDefault(p.IndexId, -1);
+                        first.Speeds[p.IndexId] = second.Speeds.GetValueOrDefault(p.IndexId, 0);
+                        if (second.IpInfos.TryGetValue(p.IndexId, out var ip))
+                        {
+                            first.IpInfos[p.IndexId] = ip;
+                        }
+                    }
+                    if (second.Cancelled)
+                    {
+                        first.Cts.Cancel();
+                    }
+                }
             }
             LastResult = CurrentJob.ProgressText;
 

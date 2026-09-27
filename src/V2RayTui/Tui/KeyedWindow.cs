@@ -1,5 +1,6 @@
 using System.Text;
 using Terminal.Gui.App;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
@@ -49,6 +50,8 @@ internal abstract class KeyedWindow : Window
         Y = Pos.Center();
         Width = Dim.Percent(94);
         Height = Dim.Percent(92);
+        BorderStyle = LineStyle.Rounded;
+        SetScheme(Theme.Base);
     }
 
     protected static string L(string en, string ru) => Loc.T(en, ru);

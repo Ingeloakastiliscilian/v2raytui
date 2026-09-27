@@ -23,6 +23,15 @@ public sealed class ProxyController
     /// <summary>The local port another application holds (last start failed because of it), or null.</summary>
     public int? PortConflict { get; private set; }
     public string RunningSummary { get; private set; } = "-";
+
+    /// <summary>Name of the server the core runs with ("" when stopped).</summary>
+    public string RunningRemarks { get; private set; } = "";
+
+    /// <summary>Real delay of the last connection check, ms (0 = unknown, -1 = failed).</summary>
+    public int LastDelay { get; private set; }
+
+    /// <summary>A connection check is in progress.</summary>
+    public bool Checking { get; private set; }
     public string AvailabilityText { get; private set; } = "";
 
     private static Config Config => AppHost.Config;
@@ -55,6 +64,9 @@ public sealed class ProxyController
             await CoreManager.Instance.LoadCore(all.MainResult.Context, all.PreSocksResult?.Context);
             CoreRunning = await WaitForLocalPortAsync();
             RunningSummary = profile.GetSummary();
+            RunningRemarks = profile.Remarks ?? "";
+            LastDelay = 0;
+            ExitGeo = null;
             _runningProfileJson = JsonUtils.Serialize(profile);
             if (!CoreRunning)
             {
@@ -280,6 +292,9 @@ public sealed class ProxyController
             await CoreManager.Instance.CoreStop();
             CoreRunning = false;
             RunningSummary = "-";
+            RunningRemarks = "";
+            LastDelay = 0;
+            ExitGeo = null;
             AvailabilityText = "";
             LogBus.Write(Loc.T("Core stopped", "Ядро остановлено"));
             StateChanged?.Invoke();
@@ -332,6 +347,7 @@ public sealed class ProxyController
         ExitGeo = null;
         ExpectedCountry = GeoIp.ExpectedCountry(item.Remarks);
         AvailabilityText = ResUI.Speedtesting;
+        Checking = true;
         StateChanged?.Invoke();
 
         var proxy = new WebProxy($"socks5://{Global.Loopback}:{AppManager.Instance.GetLocalPort(EInboundProtocol.socks)}");
@@ -354,6 +370,8 @@ public sealed class ProxyController
         {
             return;
         }
+        Checking = false;
+        LastDelay = delay;
 
         string? ipText = null;
         if (delay > 0)

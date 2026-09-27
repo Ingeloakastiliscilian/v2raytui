@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using Terminal.Gui.App;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
@@ -21,7 +22,7 @@ internal static class Dialogs
 
     public static string? Prompt(IApplication app, string title, string label, string initial = "", bool secret = false)
     {
-        using var dlg = new Dialog { Title = title, Width = Dim.Percent(70), Height = 8 };
+        using var dlg = new Dialog { BorderStyle = LineStyle.Rounded, Title = title, Width = Dim.Percent(70), Height = 8 };
         var tf = new TextField { X = 1, Y = 2, Width = Dim.Fill(1), Text = initial, Secret = secret };
         dlg.Add(new Label { Text = label, X = 1, Y = 1 }, tf);
         dlg.AddButton(new Button { Title = L("_Cancel", "_Отмена") });
@@ -34,7 +35,7 @@ internal static class Dialogs
     /// <summary>Multi-line input (share links, base64 blobs…).</summary>
     public static string? MultiLine(IApplication app, string title, string hint, string initial = "")
     {
-        using var dlg = new Dialog { Title = title, Width = Dim.Percent(85), Height = Dim.Percent(70) };
+        using var dlg = new Dialog { BorderStyle = LineStyle.Rounded, Title = title, Width = Dim.Percent(85), Height = Dim.Percent(70) };
 #pragma warning disable CS0618 // TextView is obsolete in favour of an external editor package, but fine here.
         var tv = new TextView { X = 1, Y = 2, Width = Dim.Fill(1), Height = Dim.Fill(1), Text = initial, WordWrap = false };
 #pragma warning restore CS0618
@@ -51,7 +52,7 @@ internal static class Dialogs
     {
         var width = Math.Clamp(items.Select(s => s.Length).DefaultIfEmpty(10).Max() + 8, 30, 100);
         // Explicit list height + auto dialog height: Dim.Fill would not leave room for the buttons.
-        using var dlg = new Dialog { Title = title, Width = width };
+        using var dlg = new Dialog { BorderStyle = LineStyle.Rounded, Title = title, Width = width };
         var lv = new ListView { X = 1, Y = 1, Width = Dim.Fill(1), Height = Math.Clamp(items.Count, 1, Math.Max(3, app.Screen.Height - 10)) };
         lv.SetSource(new ObservableCollection<string>(items));
         if (items.Count > 0)
@@ -71,7 +72,7 @@ internal static class Dialogs
     {
         var lines = text.Split('\n');
         var width = Math.Clamp(lines.Max(l => l.Length) + 6, 40, 200);
-        using var dlg = new Dialog { Title = title, Width = Dim.Percent(95), Height = Dim.Percent(90) };
+        using var dlg = new Dialog { BorderStyle = LineStyle.Rounded, Title = title, Width = Dim.Percent(95), Height = Dim.Percent(90) };
         dlg.Width = Dim.Func(_ => Math.Min(width, app.Screen.Width - 2));
 #pragma warning disable CS0618
         var tv = new TextView { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), Text = text, ReadOnly = true, WordWrap = false };
@@ -79,6 +80,8 @@ internal static class Dialogs
         dlg.Add(tv);
         if (copyText != null)
         {
+            // The details dialog carries a QR code: keep it black on white for cameras.
+            tv.SetScheme(Theme.Qr);
             var copy = new Button { Title = L("_Copy", "_Копировать") };
             copy.Accepting += (_, e) =>
             {

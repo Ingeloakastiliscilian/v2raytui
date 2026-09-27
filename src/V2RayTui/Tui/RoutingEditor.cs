@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Terminal.Gui.App;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
@@ -177,7 +178,7 @@ internal static class ProcessPicker
     {
         var procs = List();
         var width = Math.Min(app.Screen.Width - 4, 110);
-        using var dlg = new Dialog { Title = L("Running applications (Space — mark)", "Запущенные приложения (Space — отметить)"), Width = width };
+        using var dlg = new Dialog { BorderStyle = LineStyle.Rounded, Title = L("Running applications (Space — mark)", "Запущенные приложения (Space — отметить)"), Width = width };
         var items = new ObservableCollection<string>(procs.Select(p => $"{p.Name,-28} {p.Path}"));
         var lv = new ListView
         {

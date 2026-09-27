@@ -13,14 +13,14 @@ internal sealed partial class MainWindow : Runnable
 {
     private static string L(string en, string ru) => Loc.T(en, ru);
 
-    private readonly Label _header;
+    private readonly SegmentBar _header;
     private readonly FrameView _subsFrame;
     private readonly ListView _subsList;
     private readonly FrameView _serversFrame;
     private readonly TableView _table;
     private readonly FrameView _logFrame;
     private readonly ListView _logList;
-    private readonly Label _statusLine;
+    private readonly SegmentBar _statusLine;
 
     private readonly ObservableCollection<string> _subsItems = [];
     private readonly ObservableCollection<string> _logLines = [];
@@ -47,8 +47,9 @@ internal sealed partial class MainWindow : Runnable
         Title = "v2rayN TUI";
         Width = Dim.Fill();
         Height = Dim.Fill();
+        SetScheme(Theme.Base);
 
-        _header = new Label { X = 0, Y = 0, Width = Dim.Fill(), Height = 1 };
+        _header = new SegmentBar(Theme.Surface) { X = 0, Y = 0 };
 
         _subsList = new ListView { Width = Dim.Fill(), Height = Dim.Fill() };
         _subsList.SetSource(_subsItems);
@@ -61,6 +62,14 @@ internal sealed partial class MainWindow : Runnable
             Height = Dim.Fill(Dim.Func(_ => _logHeight + 2)),
         };
         _subsFrame.Add(_subsList);
+        Theme.Panel(_subsFrame);
+        _subsList.RowRender += (_, e) =>
+        {
+            if (e.Row >= 0 && e.Row < _subIds.Count && e.Row != _subsList.SelectedItem && _subIds[e.Row] == AliveGroup.CurrentId)
+            {
+                e.RowAttribute = Theme.A(Theme.Yellow, null, TextStyle.Bold);
+            }
+        };
 
         _table = new TableView
         {
@@ -81,6 +90,7 @@ internal sealed partial class MainWindow : Runnable
             Height = Dim.Fill(Dim.Func(_ => _logHeight + 2)),
         };
         _serversFrame.Add(_table);
+        Theme.Panel(_serversFrame);
 
         _logList = new ListView { Width = Dim.Fill(), Height = Dim.Fill() };
         _logList.SetSource(_logLines);
@@ -94,10 +104,29 @@ internal sealed partial class MainWindow : Runnable
             Visible = true,
         };
         _logFrame.Add(_logList);
+        Theme.Panel(_logFrame);
+        // No selection bar in the log unless it is focused; colour lines by meaning.
+        _logList.SetScheme(Theme.Base with { Active = Theme.A(Theme.Sub), Normal = Theme.A(Theme.Sub) });
+        _logList.RowRender += (_, e) =>
+        {
+            if (e.Row < 0 || e.Row >= _logLines.Count || (_logList.HasFocus && e.Row == _logList.SelectedItem))
+            {
+                return;
+            }
+            var line = _logLines[e.Row];
+            e.RowAttribute = line.Contains('⚠') || line.Contains("Failed") || line.Contains("Не удалось") || line.Contains("error", StringComparison.OrdinalIgnoreCase)
+                ? Theme.A(line.Contains('⚠') ? Theme.Yellow : Theme.Red)
+                : line.Contains("[alive] +") ? Theme.A(Theme.Green)
+                : line.Contains("[alive] −") ? Theme.A(Theme.Peach)
+                : line.Contains("[alive]") || line.Contains("[bg]") ? Theme.A(Theme.Mauve)
+                : line.Contains("[test]") ? Theme.A(Theme.Blue)
+                : Theme.A(Theme.Sub);
+        };
 
-        _statusLine = new Label { X = 0, Y = Pos.Bottom(_logFrame), Width = Dim.Fill(), Height = 1 };
+        _statusLine = new SegmentBar(Theme.None) { X = 0, Y = Pos.Bottom(_logFrame) };
 
         var statusBar = new StatusBar();
+        statusBar.SetScheme(Theme.ShortcutBar);
         statusBar.Add(
             Hint("F1", L("Help", "Справка")),
             Hint("Enter", L("Connect", "Подключить")),
@@ -359,6 +388,8 @@ internal sealed partial class MainWindow : Runnable
                 lines.Add(Line((s.Enabled ? "" : "·") + s.Remarks, counts.GetValueOrDefault(s.Id ?? "", 0)));
             }
 
+            _aliveCount = aliveId != null ? counts.GetValueOrDefault(aliveId, 0) : 0;
+            _stateDirty = true;
             var current = Config.SubIndexId ?? "";
             if (!ids.Contains(current))
             {
@@ -486,35 +517,110 @@ internal sealed partial class MainWindow : Runnable
             return;
         }
         _stateDirty = false;
+        UpdateHeader();
+        UpdateStatusLine();
+    }
 
+    private void UpdateHeader()
+    {
         var pc = ProxyController.Instance;
+        var left = new List<SegmentBar.Segment>
+        {
+            new(" ◆ v2rayN TUI ", Theme.A(Theme.Crust, Theme.Mauve, TextStyle.Bold)),
+            new(" ", Theme.A(Theme.Text)),
+        };
+        if (pc.CoreRunning)
+        {
+            left.Add(new($" ● {L("connected", "подключено")} ", Theme.A(Theme.Crust, Theme.Green, TextStyle.Bold)));
+        }
+        else if (pc.PortConflict is { } busy)
+        {
+            left.Add(new($" ⚠ {L("port", "порт")} {busy} {L("busy", "занят")} ", Theme.A(Theme.Crust, Theme.Peach, TextStyle.Bold)));
+        }
+        else
+        {
+            left.Add(new($" ○ {L("disconnected", "отключено")} ", Theme.A(Theme.Crust, Theme.Red, TextStyle.Bold)));
+        }
+        if (pc.RunningRemarks.IsNotEmpty())
+        {
+            left.Add(new("  " + pc.RunningRemarks, Theme.A(Theme.Text, null, TextStyle.Bold)));
+        }
+        if (pc.Checking)
+        {
+            left.Add(new("  ⟳", Theme.A(Theme.Blue)));
+        }
+        else if (pc.LastDelay != 0)
+        {
+            left.Add(new(pc.LastDelay > 0 ? $"  {pc.LastDelay} {L("ms", "мс")}" : $"  {L("no connection", "нет соединения")}", Theme.A(Theme.DelayColor(pc.LastDelay))));
+        }
+        if (pc.ExitGeo is { } geo)
+        {
+            left.Add(new($"  ⇢ {GeoIp.Flag(geo.Country)} {geo.CountryName}", Theme.A(pc.CountryMismatch ? Theme.Yellow : Theme.Teal)));
+            if (pc.CountryMismatch && pc.ExpectedCountry is { } exp)
+            {
+                left.Add(new($"  ⚠ {L("name says", "в названии")} {GeoIp.Flag(exp)}", Theme.A(Theme.Yellow, null, TextStyle.Bold)));
+            }
+        }
+
+        var inbound = Config.Inbound.First();
         var sys = Config.SystemProxyItem.SysProxyType switch
         {
             ESysProxyType.ForcedClear => L("clear", "очистить"),
-            ESysProxyType.ForcedChange => L("set", "установить"),
+            ESysProxyType.ForcedChange => L("set", "установлен"),
             ESysProxyType.Pac => "PAC",
             _ => L("unchanged", "не менять"),
         };
-        var routing = Config.RoutingBasicItem.RoutingIndexId;
-        var port = AppManager.Instance.GetLocalPort(EInboundProtocol.socks);
-        var run = pc.CoreRunning ? "●" : "○";
-        _header.Text = $" {run} {pc.RunningSummary}  {pc.AvailabilityText}  │ mixed:{port}{(Config.Inbound.First().AllowLANConn ? "+LAN" : "")} │ {L("sysproxy", "сист.прокси")}: {sys} │ TUN: {(Config.TunModeItem.EnableTun ? L("on", "вкл") : L("off", "выкл"))} │ {_routingName}";
-
-        var jobs = TestService.Instance.Jobs.Where(j => j.IsRunning || (DateTime.Now - j.Finished!.Value).TotalSeconds < 15).ToList();
-        var jobText = string.Join("  ", jobs.Select(j => $"[{j.Title}] {j.ProgressText}"));
-        var bg = BackgroundScheduler.Instance;
-        var bgText = AppHost.Settings.BackgroundEnabled
-            ? bg.IsRunning
-                ? L("BG: running", "Фон: идёт")
-                : $"{L("BG: next", "Фон: след.")} {bg.NextRun:HH:mm}"
-            : L("BG: off", "Фон: выкл");
-        if (AppHost.Settings.AliveEnabled && bg.LastRun is { } last)
+        var tun = Config.TunModeItem.EnableTun;
+        var right = new List<SegmentBar.Segment>
         {
-            bgText += $" ({L("last", "посл.")} {last:HH:mm}: {bg.LastResult})";
-        }
-        var notice = (DateTime.Now - _noticeAt).TotalSeconds < 8 ? " │ " + _notice : "";
-        _statusLine.Text = $" {bgText}{(jobText.Length > 0 ? " │ " + jobText : "")}{notice}";
+            new($"⇄ :{AppManager.Instance.GetLocalPort(EInboundProtocol.socks)}{(inbound.AllowLANConn ? " LAN" : "")}  ", Theme.A(Theme.Sub)),
+            new($"{L("sysproxy", "сист.прокси")}: {sys}  ", Theme.A(Theme.Sub)),
+            new(tun ? " TUN " : "TUN ", tun ? Theme.A(Theme.Crust, Theme.Teal, TextStyle.Bold) : Theme.A(Theme.Dim)),
+            new($"  ⤳ {_routingName} ", Theme.A(Theme.Sub)),
+        };
+        _header.Set(left, right);
     }
+
+    private void UpdateStatusLine()
+    {
+        var segs = new List<SegmentBar.Segment> { new(" ", Theme.A(Theme.Text)) };
+        var bg = BackgroundScheduler.Instance;
+        var bgJob = TestService.Instance.RunningJobs.FirstOrDefault(j => j.Background);
+        if (bgJob != null)
+        {
+            segs.Add(new($"⟳ {L("background", "фон")} ", Theme.A(Theme.Blue, null, TextStyle.Bold)));
+            segs.Add(new($"{Theme.Bar(bgJob.PhaseDone, Math.Max(1, bgJob.PhaseTotal), 12)} {bgJob.Phase} {bgJob.PhaseDone}/{bgJob.PhaseTotal}", Theme.A(Theme.Blue)));
+            segs.Add(new($"  ✓{bgJob.Alive} ✗{bgJob.Failed}", Theme.A(Theme.Sub)));
+        }
+        else if (AppHost.Settings.BackgroundEnabled)
+        {
+            segs.Add(new($"◷ {L("next cycle", "след. цикл")} {bg.NextRun:HH:mm}", Theme.A(Theme.Sub)));
+            if (bg.LastRun is { } last)
+            {
+                segs.Add(new($"  ({L("last", "посл.")} {last:HH:mm})", Theme.A(Theme.Dim)));
+            }
+        }
+        else
+        {
+            segs.Add(new($"◌ {L("background off", "фон выкл")}", Theme.A(Theme.Dim)));
+        }
+        if (AppHost.Settings.AliveEnabled)
+        {
+            segs.Add(new($"   ★ {AppHost.Settings.AliveName} {_aliveCount}", Theme.A(Theme.Yellow, null, TextStyle.Bold)));
+        }
+        foreach (var j in TestService.Instance.Jobs.Where(j => !j.Background && (j.IsRunning || (DateTime.Now - j.Finished!.Value).TotalSeconds < 15)))
+        {
+            segs.Add(new($"   ▶ {j.Title} ", Theme.A(Theme.Mauve, null, TextStyle.Bold)));
+            segs.Add(new(j.IsRunning ? $"{Theme.Bar(j.PhaseDone, Math.Max(1, j.PhaseTotal), 8)} {j.PhaseDone}/{j.PhaseTotal}" : j.ProgressText, Theme.A(Theme.Mauve)));
+        }
+        if ((DateTime.Now - _noticeAt).TotalSeconds < 8)
+        {
+            segs.Add(new($"   {_notice}", Theme.A(Theme.Yellow)));
+        }
+        _statusLine.Set(segs);
+    }
+
+    private int _aliveCount;
 
     private string _routingName = "";
 
@@ -522,7 +628,7 @@ internal sealed partial class MainWindow : Runnable
     {
         var items = await ProxyController.Instance.GetRoutingsAsync();
         var active = items.FirstOrDefault(r => r.IsActive) ?? items.FirstOrDefault(r => r.Id == Config.RoutingBasicItem.RoutingIndexId);
-        _routingName = active != null ? $"{L("routing", "маршруты")}: {active.Remarks}" : "";
+        _routingName = active?.Remarks ?? "";
         _stateDirty = true;
     }
 
@@ -532,6 +638,7 @@ internal sealed partial class MainWindow : Runnable
 
     private void ConfigureTableStyle()
     {
+        _table.SetScheme(Theme.Base);
         var st = _table.Style;
         st.ShowHorizontalHeaderOverline = false;
         st.ShowVerticalCellLines = false;
@@ -539,22 +646,37 @@ internal sealed partial class MainWindow : Runnable
         st.ShowHorizontalHeaderUnderline = true;
         st.ExpandLastColumn = true;
         st.SmoothHorizontalScrolling = true;
+        st.HeaderScheme = Theme.Flat(Theme.A(Theme.Sub, null, TextStyle.Bold));
+        st.ShowVerticalCellLineForFirstColumn = false;
+        st.ShowVerticalCellLineForLastColumn = false;
+        st.AlwaysUseNormalColorForVerticalCellLines = true;
 
-        st.GetOrCreateColumnStyle(ServerTableSource.ColMark).MaxWidth = 2;
-        st.GetOrCreateColumnStyle(ServerTableSource.ColType).MaxWidth = 11;
-        st.GetOrCreateColumnStyle(ServerTableSource.ColName).MaxWidth = 38;
-        st.GetOrCreateColumnStyle(ServerTableSource.ColAddress).MaxWidth = 30;
-        st.GetOrCreateColumnStyle(ServerTableSource.ColTransport).MaxWidth = 12;
-        st.GetOrCreateColumnStyle(ServerTableSource.ColSub).MaxWidth = 14;
+        st.GetOrCreateColumnStyle(ServerTableSource.ColMark).MaxWidth = 1;
+        var ip = st.GetOrCreateColumnStyle(ServerTableSource.ColIp);
+        ip.MinWidth = 2;
+        ip.MaxWidth = 3;
+        ip.ColorGetter = a => a.RowIndex >= 0 && a.RowIndex < _rows.Count && GeoIp.IpInfoMismatch(_rows[a.RowIndex].IpInfo)
+            ? a.RowScheme with { Normal = Theme.A(Theme.Yellow, Theme.MismatchBg) }
+            : null;
+        st.GetOrCreateColumnStyle(ServerTableSource.ColName).MaxWidth = 40;
+        st.GetOrCreateColumnStyle(ServerTableSource.ColType).MaxWidth = 7;
+        var addr = st.GetOrCreateColumnStyle(ServerTableSource.ColAddress);
+        addr.MaxWidth = 28;
+        addr.ColorGetter = a => Dimmed(a);
+        var transport = st.GetOrCreateColumnStyle(ServerTableSource.ColTransport);
+        transport.MaxWidth = 12;
+        transport.ColorGetter = a => Dimmed(a);
+        var sub = st.GetOrCreateColumnStyle(ServerTableSource.ColSub);
+        sub.MaxWidth = 14;
+        sub.ColorGetter = a => Dimmed(a);
         var delay = st.GetOrCreateColumnStyle(ServerTableSource.ColDelay);
         delay.MinWidth = 8;
         delay.MaxWidth = 10;
         delay.Alignment = Alignment.End;
         delay.ColorGetter = a => CellScheme(a, DelayColor(a.RowIndex));
         var speed = st.GetOrCreateColumnStyle(ServerTableSource.ColSpeed);
-        speed.MinWidth = 9;
-        speed.MaxWidth = 14;
-        speed.Alignment = Alignment.End;
+        speed.MinWidth = 14;
+        speed.MaxWidth = 16;
         speed.ColorGetter = a => CellScheme(a, SpeedColor(a.RowIndex));
 
         st.RowColorGetter = a =>
@@ -565,18 +687,24 @@ internal sealed partial class MainWindow : Runnable
             }
             var r = _rows[a.RowIndex];
             var baseScheme = _table.GetScheme();
-            var n = baseScheme.Normal;
             if (r.IsActive)
             {
-                return baseScheme with { Normal = new Attribute(new Color(ColorName16.BrightGreen), n.Background, TextStyle.Bold) };
+                return baseScheme with { Normal = Theme.A(Theme.Green, null, TextStyle.Bold) };
             }
             if (r.Marked)
             {
-                return baseScheme with { Normal = new Attribute(new Color(ColorName16.BrightYellow), n.Background) };
+                return baseScheme with { Normal = Theme.A(Theme.Yellow) };
+            }
+            if (r.Delay < 0)
+            {
+                return baseScheme with { Normal = Theme.A(Theme.Dim) };
             }
             return null;
         };
     }
+
+    private static Scheme? Dimmed(CellColorGetterArgs a) =>
+        a.RowScheme.Normal.Foreground == Theme.Text ? a.RowScheme with { Normal = Theme.A(Theme.Sub) } : null;
 
     private Color? DelayColor(int row)
     {
@@ -587,16 +715,9 @@ internal sealed partial class MainWindow : Runnable
         var r = _rows[row];
         if (r.DelayStatus.IsNotEmpty())
         {
-            return new Color(ColorName16.Cyan);
+            return Theme.Blue;
         }
-        return r.Delay switch
-        {
-            < 0 => new Color(ColorName16.BrightRed),
-            0 => null,
-            < 300 => new Color(ColorName16.BrightGreen),
-            < 800 => new Color(ColorName16.Yellow),
-            _ => new Color(ColorName16.Red),
-        };
+        return r.Delay == 0 ? null : Theme.DelayColor(r.Delay);
     }
 
     private Color? SpeedColor(int row)
@@ -608,14 +729,9 @@ internal sealed partial class MainWindow : Runnable
         var r = _rows[row];
         if (r.SpeedStatus.IsNotEmpty())
         {
-            return new Color(ColorName16.Cyan);
+            return Theme.Blue;
         }
-        return r.Speed switch
-        {
-            <= 0 => null,
-            < 1 => new Color(ColorName16.Yellow),
-            _ => new Color(ColorName16.BrightGreen),
-        };
+        return r.Speed <= 0 ? null : Theme.SpeedColor(r.Speed);
     }
 
     private static Scheme? CellScheme(CellColorGetterArgs a, Color? fg)
@@ -625,7 +741,7 @@ internal sealed partial class MainWindow : Runnable
             return null;
         }
         var n = a.RowScheme.Normal;
-        return a.RowScheme with { Normal = new Attribute(fg.Value, n.Background, n.Style) };
+        return a.RowScheme with { Normal = Theme.A(fg.Value, n.Background, n.Style) };
     }
 
     #endregion table style

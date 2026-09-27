@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <PackageReference Include="Terminal.Gui" Version="2.5.0" />
+    <!-- Native Skia for QR decoding (import QR from image); v2rayN adds it only in its desktop app. -->
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.4" />
   </ItemGroup>
 
   <ItemGroup>
