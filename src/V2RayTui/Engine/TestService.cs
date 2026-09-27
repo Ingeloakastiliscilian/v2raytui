@@ -46,8 +46,17 @@ public sealed class TestJob
     /// <summary>Speed test duration for this job, seconds (null = v2rayN's SpeedTestTimeout).</summary>
     public int? SpeedSeconds { get; init; }
 
+    private readonly ConcurrentDictionary<string, byte> _finished = new();
+
+    /// <summary>Signalled when the ping phase of a PingThenSpeed job is over (or the job ended).</summary>
+    public TaskCompletionSource PingPhaseDone { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     internal void Finish(string id)
     {
+        if (!_finished.TryAdd(id, 0))
+        {
+            return;
+        }
         try
         {
             OnItemFinished?.Invoke(id, Delays.GetValueOrDefault(id, -1), Speeds.GetValueOrDefault(id, 0), IpInfos.GetValueOrDefault(id));
@@ -150,8 +159,11 @@ public sealed class TestService
 
     public IReadOnlyList<TestJob> RunningJobs => Jobs.Where(j => j.IsRunning).ToList();
 
+    private readonly AsyncLimiter _backgroundSpeedSlots = new(1);
+
     public void ApplySettings(TuiSettings s)
     {
+        _backgroundSpeedSlots.Limit = s.BackgroundSpeedConcurrency;
         _coreSlots.Limit = s.ParallelCores;
         _pingSlots.Limit = s.PingConcurrency;
         _speedSlots.Limit = s.SpeedConcurrency;
@@ -168,7 +180,8 @@ public sealed class TestService
             Mode = mode,
             Background = background,
             SpeedTopN = speedTopN,
-            SpeedLimiter = background ? new AsyncLimiter(AppHost.Settings.BackgroundSpeedConcurrency) : null,
+            // One limiter for all background jobs: a re-check running next to the main cycle must not double downloads.
+            SpeedLimiter = background ? _backgroundSpeedSlots : null,
             OnItemFinished = onItemFinished,
             ForceIpInfo = onItemFinished != null,
             SpeedSeconds = speedSeconds,
@@ -261,6 +274,7 @@ public sealed class TestService
                     {
                         job.Finish(p.IndexId);
                     }
+                    job.PingPhaseDone.TrySetResult();
                     job.StartPhase("speed", top.Count);
                     await RunCoreBatchesAsync(job, top, async (it, c) =>
                     {
@@ -296,6 +310,7 @@ public sealed class TestService
             {
                 LogBus.Write($"[test] save: {ex.Message}");
             }
+            job.PingPhaseDone.TrySetResult();
             job.Finished = DateTime.Now;
             LogBus.Write($"[test] {job.Title}: {job.ProgressText} ({(job.Finished.Value - job.Started).TotalSeconds:0}s)");
             JobChanged?.Invoke(job);
@@ -541,7 +556,14 @@ public sealed class TestService
     /// Exit IP / country of one server through its own temporary core. Unlike the main proxy port, this
     /// has no routing rules, so the answer is the server's real exit (not "direct" by a bypass rule).
     /// </summary>
-    public async Task<GeoInfo?> ProbeGeoAsync(ProfileItem profile, CancellationToken ct = default)
+    public async Task<GeoInfo?> ProbeGeoAsync(ProfileItem profile, CancellationToken ct = default) =>
+        (await ProbeAsync(profile, true, ct)).Geo;
+
+    /// <summary>
+    /// Real delay (and optionally exit country) of one server through its own temporary core, bypassing
+    /// routing rules — what the server itself does, not what the rules send direct.
+    /// </summary>
+    public async Task<(int Delay, GeoInfo? Geo)> ProbeAsync(ProfileItem profile, bool withGeo, CancellationToken ct = default)
     {
         var item = new ServerTestItem
         {
@@ -568,11 +590,18 @@ public sealed class TestService
         }
         if (proc == null || proc.HasExited)
         {
-            return null;
+            return (-1, null);
         }
         try
         {
-            return await GeoIp.LookupAsync(new WebProxy($"socks5://{Global.Loopback}:{item.Port}"), ct);
+            var proxy = new WebProxy($"socks5://{Global.Loopback}:{item.Port}");
+            var delay = -1;
+            for (var i = 0; i < 2 && delay <= 0; i++)
+            {
+                delay = await ConnectionHandler.GetRealPingTime(proxy, ct);
+            }
+            var geo = delay > 0 && withGeo ? await GeoIp.LookupAsync(proxy, ct) : null;
+            return (delay, geo);
         }
         finally
         {

@@ -378,16 +378,9 @@ public sealed class ProxyController
         Checking = true;
         StateChanged?.Invoke();
 
-        var proxy = new WebProxy($"socks5://{Global.Loopback}:{AppManager.Instance.GetLocalPort(EInboundProtocol.socks)}");
-        var delay = -1;
-        for (var i = 0; i < 2 && delay <= 0; i++)
-        {
-            delay = await ConnectionHandler.GetRealPingTime(proxy);
-            if (delay <= 0)
-            {
-                await Task.Delay(500);
-            }
-        }
+        // Through the server itself (a temporary core without routing rules). Through the local port the
+        // user's rules may send the test URL direct — then the "delay" is the ISP's, even for a dead server.
+        var (delay, probedGeo) = await TestService.Instance.ProbeAsync(item, AppHost.Settings.CheckCountryOnConnect);
         if (TunActive && TunUp == true)
         {
             // Without the proxy port: this is what every app sees when TUN works.
@@ -396,12 +389,7 @@ public sealed class ProxyController
                 ? Loc.T($"TUN: system traffic exits via {sys.Country} {sys.CountryName} {sys.Ip}", $"TUN: трафик системы выходит через {sys.Country} {sys.CountryName} {sys.Ip}")
                 : Loc.T("TUN: system traffic has no internet access", "TUN: у трафика системы нет доступа в интернет"));
         }
-        GeoInfo? geo = null;
-        if (delay > 0 && AppHost.Settings.CheckCountryOnConnect)
-        {
-            // Through a separate core without routing rules: a bypass rule must not hide the server's exit.
-            geo = await TestService.Instance.ProbeGeoAsync(item);
-        }
+        var geo = probedGeo;
         if (generation != Volatile.Read(ref _checkGeneration))
         {
             return;
@@ -410,9 +398,11 @@ public sealed class ProxyController
         LastDelay = delay;
 
         string? ipText = null;
-        if (delay > 0)
+        ProfileExManager.Instance.SetTestDelay(item.IndexId, delay > 0 ? delay : -1);
+        if (delay <= 0)
         {
-            ProfileExManager.Instance.SetTestDelay(item.IndexId, delay);
+            LogBus.Notice(Loc.T($"⚠ The active server {item.Remarks} does not respond — pick another one (e.g. from Alive)",
+                $"⚠ Активный сервер {item.Remarks} не отвечает — выберите другой (например, из Alive)"));
         }
         if (geo != null)
         {
@@ -420,10 +410,10 @@ public sealed class ProxyController
             ProfileExManager.Instance.SetTestIpInfo(item.IndexId, ipText);
         }
         ExitGeo = geo;
-        TestService.Instance.Publish(new TestUpdate(item.IndexId, Delay: delay > 0 ? delay : null, IpInfo: ipText));
+        TestService.Instance.Publish(new TestUpdate(item.IndexId, Delay: delay > 0 ? delay : -1, IpInfo: ipText));
 
         var sb = new StringBuilder();
-        sb.Append(delay > 0 ? $"{delay} {Loc.T("ms", "мс")}" : Loc.T("no connection", "нет соединения"));
+        sb.Append(delay > 0 ? $"{delay} {Loc.T("ms", "мс")}" : Loc.T("server does not respond", "сервер не отвечает"));
         if (geo != null)
         {
             sb.Append($" │ {geo.Country} {geo.CountryName} {geo.Ip}");

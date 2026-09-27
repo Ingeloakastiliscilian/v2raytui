@@ -163,6 +163,13 @@ public sealed class BackgroundScheduler
         try
         {
             Changed?.Invoke();
+            if (!CoreUpdater.MainCores.Any(CoreUpdater.IsInstalled))
+            {
+                // Without a core every server would look dead: skip instead of recording false failures.
+                LastResult = Loc.T("no core installed (F8 / core update)", "ядра не установлены (F8 / core update)");
+                LogBus.Notice("[bg] " + LastResult);
+                return;
+            }
             var aliveOn = S.AliveEnabled;
             var aliveId = aliveOn ? await AliveGroup.EnsureAsync() : null;
             // The Alive group is a result, never a test source.
@@ -218,41 +225,41 @@ public sealed class BackgroundScheduler
                     onItemFinished: session!.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds)
                 : TestService.Instance.Start(title, S.BackgroundMode, items, background: true, speedSeconds: S.BackgroundSpeedTestSeconds);
             Changed?.Invoke();
+            var firstJob = CurrentJob;
+            // Group members dead at the ping phase are re-checked right away (not after the long speed phase),
+            // so dead servers leave the group within seconds of the cycle start.
+            var quickRetry = session != null
+                ? Task.Run(async () =>
+                {
+                    await Task.WhenAny(firstJob.PingPhaseDone.Task, firstJob.Completion);
+                    if (!firstJob.Cancelled)
+                    {
+                        await RecheckAsync(firstJob, session, title, Loc.T("re-checking {0} not answering", "перепроверка {0} не ответивших"), ct);
+                    }
+                }, ct)
+                : Task.CompletedTask;
             using (ct.Register(() => CurrentJob?.Cts.Cancel()))
             {
-                await CurrentJob.Completion;
+                await firstJob.Completion;
             }
+            try
+            {
+                await quickRetry;
+            }
+            catch (OperationCanceledException)
+            {
+                // cancelled with the cycle
+            }
+            CurrentJob = firstJob;
             if (session != null)
             {
                 await session.DrainAsync();
-                // Second check for group members that failed once (a single bad measurement must not
-                // throw a working server out); only when the network worked in this cycle.
-                if (!CurrentJob.Cancelled && session.AnyQualified && session.BeginRetry() is { Count: > 0 } retry)
+                // Second check for group members that failed the speed threshold once (a single bad measurement
+                // must not throw a working server out); only when the network worked in this cycle.
+                if (!firstJob.Cancelled && session.AnyQualified)
                 {
-                    LogBus.Write("[alive] " + Loc.T($"re-checking {retry.Count} that failed once", $"перепроверка {retry.Count} не прошедших с первого раза"));
                     SetStage(Loc.T("re-check", "перепроверка"));
-                    var first = CurrentJob;
-                    var second = TestService.Instance.Start(title + Loc.T(": re-check", ": перепроверка"), TestMode.PingThenSpeed, retry, background: true,
-                        speedTopN: 0, onItemFinished: session.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds);
-                    using (ct.Register(() => second.Cts.Cancel()))
-                    {
-                        await second.Completion;
-                    }
-                    await session.DrainAsync();
-                    // The final reconciliation sees the second result.
-                    foreach (var p in retry)
-                    {
-                        first.Delays[p.IndexId] = second.Delays.GetValueOrDefault(p.IndexId, -1);
-                        first.Speeds[p.IndexId] = second.Speeds.GetValueOrDefault(p.IndexId, 0);
-                        if (second.IpInfos.TryGetValue(p.IndexId, out var ip))
-                        {
-                            first.IpInfos[p.IndexId] = ip;
-                        }
-                    }
-                    if (second.Cancelled)
-                    {
-                        first.Cts.Cancel();
-                    }
+                    await RecheckAsync(firstJob, session, title, Loc.T("re-checking {0} that failed once", "перепроверка {0} не прошедших с первого раза"), ct);
                 }
             }
             LastResult = CurrentJob.ProgressText;
@@ -273,6 +280,40 @@ public sealed class BackgroundScheduler
             Stage = "";
             _runGate.Release();
             Changed?.Invoke();
+        }
+    }
+
+    /// <summary>
+    /// Re-tests group members that failed (dropping those that fail again) and merges the new results into
+    /// <paramref name="first"/>, which the final reconciliation reads.
+    /// </summary>
+    private async Task RecheckAsync(TestJob first, AliveSession session, string title, string message, CancellationToken ct)
+    {
+        var retry = await session.BeginRetryAsync();
+        if (retry.Count == 0)
+        {
+            return;
+        }
+        LogBus.Write("[alive] " + string.Format(message, retry.Count));
+        var second = TestService.Instance.Start(title + Loc.T(": re-check", ": перепроверка"), TestMode.PingThenSpeed, retry, background: true,
+            speedTopN: 0, onItemFinished: session.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds);
+        using (ct.Register(() => second.Cts.Cancel()))
+        {
+            await second.Completion;
+        }
+        await session.DrainAsync();
+        foreach (var p in retry)
+        {
+            first.Delays[p.IndexId] = second.Delays.GetValueOrDefault(p.IndexId, -1);
+            first.Speeds[p.IndexId] = second.Speeds.GetValueOrDefault(p.IndexId, 0);
+            if (second.IpInfos.TryGetValue(p.IndexId, out var ip))
+            {
+                first.IpInfos[p.IndexId] = ip;
+            }
+        }
+        if (second.Cancelled)
+        {
+            first.Cts.Cancel();
         }
     }
 

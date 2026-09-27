@@ -579,7 +579,9 @@ internal sealed partial class MainWindow : Runnable
         }
         else if (pc.LastDelay != 0)
         {
-            left.Add(new(pc.LastDelay > 0 ? $"  {pc.LastDelay} {L("ms", "мс")}" : $"  {L("no connection", "нет соединения")}", Theme.A(Theme.DelayColor(pc.LastDelay))));
+            left.Add(pc.LastDelay > 0
+                ? new($"  {pc.LastDelay} {L("ms", "мс")}", Theme.A(Theme.DelayColor(pc.LastDelay)))
+                : new($"  ✗ {L("server does not respond", "сервер не отвечает")} ", Theme.A(Theme.Crust, Theme.Red, TextStyle.Bold)));
         }
         if (pc.ExitGeo is { } geo)
         {

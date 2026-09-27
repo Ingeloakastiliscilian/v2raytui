@@ -280,7 +280,8 @@ public sealed class AliveSession
     private readonly Dictionary<string, ProfileItem> _copies = new();
     private readonly List<string> _deferredDrops = [];
     private readonly HashSet<string> _retryKeys = [];
-    private bool _retrying;
+    /// <summary>Keys being re-checked: failing now removes them from the group.</summary>
+    private readonly HashSet<string> _retryingKeys = [];
     private readonly Lock _gate = new();
     private Task _chain = Task.CompletedTask;
     private bool _keptActiveNoticed;
@@ -448,7 +449,7 @@ public sealed class AliveSession
             // but a server of the group first gets a second check at the end of the cycle.
             if (_pending[key] <= 0 && !_bestSpeed.ContainsKey(key) && _copies.ContainsKey(key))
             {
-                if (!_retrying)
+                if (!_retryingKeys.Contains(key))
                 {
                     _retryKeys.Add(key);
                 }
@@ -477,15 +478,27 @@ public sealed class AliveSession
     /// Switches the session to the second-check pass and returns one server per group member that
     /// failed the first pass. Failing again removes it.
     /// </summary>
-    public List<ProfileItem> BeginRetry()
+    public Task<List<ProfileItem>> BeginRetryAsync()
     {
-        _retrying = true;
+        // Runs in the same serialized chain as result handling (the main job may still be delivering results).
+        var tcs = new TaskCompletionSource<List<ProfileItem>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_gate)
+        {
+            _chain = _chain.ContinueWith(_ => tcs.SetResult(BeginRetryCore()), TaskScheduler.Default);
+        }
+        return tcs.Task;
+    }
+
+    private List<ProfileItem> BeginRetryCore()
+    {
         var items = new List<ProfileItem>();
-        foreach (var key in _retryKeys.Where(k => !_bestSpeed.ContainsKey(k)))
+        var keys = _retryKeys.Where(k => !_bestSpeed.ContainsKey(k) && !_retryingKeys.Contains(k)).ToList();
+        foreach (var key in keys)
         {
             var id = _sourcesOfKey[key].FirstOrDefault(i => _sources.ContainsKey(i));
             if (id != null)
             {
+                _retryingKeys.Add(key);
                 _pending[key] = 1;
                 items.Add(_sources[id]);
             }
