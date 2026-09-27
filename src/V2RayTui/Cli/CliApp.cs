@@ -104,8 +104,9 @@ Usage: v2rayn-tui [--data DIR | --portable] [--lang en|ru] [command]
   geo update [--proxy]
 
 SUB is a subscription id, its name or its number from `sub list`.
-Data: ~/.local/share/v2rayN (shared with v2rayN desktop); --data DIR (or V2RAYN_TUI_DATA) = DIR/v2rayN;
---portable = next to the binary.
+Data: ~/.local/share/v2rayn-tui/v2rayN (on first run subscriptions, servers and settings are copied
+from v2rayN desktop, cores are downloaded fresh); --data DIR (or V2RAYN_TUI_DATA) = DIR/v2rayN
+(--data ~/.local/share/v2rayN shares v2rayN's data); --portable = next to the binary.
 """,
 """
 v2rayn-tui — терминальный интерфейс к движку v2rayN (xray / sing-box)
@@ -136,8 +137,9 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
   geo update [--proxy]
 
 ПОДП — id подписки, её имя или номер из `sub list`.
-Данные: ~/.local/share/v2rayN (общие с v2rayN desktop); --data КАТАЛОГ (или V2RAYN_TUI_DATA) — КАТАЛОГ/v2rayN;
---portable — рядом с бинарником.
+Данные: ~/.local/share/v2rayn-tui/v2rayN (при первом запуске подписки, серверы и настройки копируются
+из v2rayN desktop, ядра скачиваются заново); --data КАТАЛОГ (или V2RAYN_TUI_DATA) — КАТАЛОГ/v2rayN
+(--data ~/.local/share/v2rayN — общие данные с v2rayN); --portable — рядом с бинарником.
 """));
     }
 

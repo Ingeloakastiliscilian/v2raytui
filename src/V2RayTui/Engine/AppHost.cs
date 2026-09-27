@@ -35,6 +35,15 @@ public static class AppHost
     /// </param>
     public static void PrepareEnvironment(bool portable, string? dataDir = null)
     {
+        if (!portable && dataDir.IsNullOrEmpty())
+        {
+            // Default: a directory of our own. Sharing v2rayN's (~/.local/share/v2rayN) does not work in general:
+            // its cores are versioned for that GUI (e.g. v2rayN 7.20 + sing-box 1.13 vs our 7.25 engine + 1.14),
+            // and the GUI and the TUI cannot run on the same data at once.
+            var baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            dataDir = Path.Combine(baseDir, "v2rayn-tui");
+            ImportFromGuiOnFirstRun(Path.Combine(dataDir, "v2rayN"), Path.Combine(baseDir, "v2rayN"));
+        }
         if (dataDir.IsNotEmpty())
         {
             if (dataDir.StartsWith("~/"))
@@ -56,6 +65,44 @@ public static class AppHost
         if (!portable)
         {
             Environment.SetEnvironmentVariable(Global.LocalAppData, "1", EnvironmentVariableTarget.Process);
+        }
+    }
+
+    /// <summary>What the first-run import brought over (reported after start).</summary>
+    public static string? ImportedFrom { get; private set; }
+
+    /// <summary>
+    /// First run: copies v2rayN's subscriptions, servers, routing and settings (not its cores — they may be too
+    /// old for this engine; fresh ones are downloaded) into our own data directory.
+    /// </summary>
+    private static void ImportFromGuiOnFirstRun(string target, string gui)
+    {
+        try
+        {
+            var targetConfigs = Path.Combine(target, "guiConfigs");
+            var guiConfigs = Path.Combine(gui, "guiConfigs");
+            if (File.Exists(Path.Combine(targetConfigs, "guiNDB.db")) || !File.Exists(Path.Combine(guiConfigs, "guiNDB.db")))
+            {
+                return;
+            }
+            Directory.CreateDirectory(targetConfigs);
+            foreach (var file in Directory.EnumerateFiles(guiConfigs))
+            {
+                var name = Path.GetFileName(file);
+                if (name is "tui.lock" or "tui.pid")
+                {
+                    continue;
+                }
+                // Read with sharing: v2rayN may be running and holding its files open.
+                using var src = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var dst = File.Create(Path.Combine(targetConfigs, name));
+                src.CopyTo(dst);
+            }
+            ImportedFrom = gui;
+        }
+        catch
+        {
+            // a failed import just means starting empty
         }
     }
 
@@ -97,6 +144,11 @@ public static class AppHost
 
         AppManager.Instance.InitComponents();
         LogBus.EnableFile(Utils.GetLogPath());
+        if (ImportedFrom != null)
+        {
+            LogBus.Notice(Loc.T($"First run: subscriptions, servers and settings copied from {ImportedFrom}; cores will be downloaded fresh",
+                $"Первый запуск: подписки, серверы и настройки скопированы из {ImportedFrom}; ядра будут скачаны заново"));
+        }
         Settings = TuiSettings.Load();
         LogBus.KeepCoreOutput = Settings.ShowCoreOutput;
 
