@@ -46,6 +46,12 @@ public static class Daemon
             BackgroundScheduler.Instance.RunNow();
         });
 
+        if (args.Has("--detached"))
+        {
+            // Started by `v2rayn-tui` in its own session: do not keep that terminal.
+            UnixFd.StdioToDevNull();
+        }
+
         try
         {
             if (!await AppHost.InitAsync(registerScheduledTasks: true))
@@ -53,6 +59,8 @@ public static class Daemon
                 return 1;
             }
             LogBus.Write($"v2rayn-tui daemon, pid {Environment.ProcessId}, data: {AppHost.DataDir}");
+            // `v2rayn-tui` in any terminal opens the interface of this process ("Quit" there stops it).
+            AttachHost.Instance.Start(() => stop.TrySetResult());
 
             if (CoreUpdater.MissingComponents() is { Count: > 0 } missing)
             {
@@ -86,14 +94,41 @@ public static class Daemon
         }
         finally
         {
+            AttachHost.Instance.Stop();
             ProxyController.Instance.StopWatchdog();
             await BackgroundScheduler.Instance.StopAsync();
-            TestService.Instance.StopAll();
+            await TestService.Instance.StopAllAsync();
             await AppHost.ShutdownAsync();
             LogBus.Write("bye");
             logFile?.Dispose();
         }
         return 0;
+    }
+
+    /// <summary>Starts the background instance for `v2rayn-tui` (its own session, no terminal).</summary>
+    public static void SpawnServer()
+    {
+        var exe = Environment.ProcessPath!;
+        var args = new List<string>();
+        if (Path.GetFileNameWithoutExtension(exe) is "dotnet")
+        {
+            args.Add(Environment.GetCommandLineArgs()[0]);
+        }
+        args.AddRange(["daemon", "--detached", "--log", Utils.GetLogPath("daemon.log")]);
+        args.AddRange(AppHost.DataArgs);
+        var psi = new ProcessStartInfo { UseShellExecute = false, RedirectStandardInput = true };
+        if (File.Exists("/usr/bin/setsid"))
+        {
+            psi.FileName = "/usr/bin/setsid";
+            psi.ArgumentList.Add("-f");
+            psi.ArgumentList.Add(exe);
+        }
+        else
+        {
+            psi.FileName = exe;
+        }
+        args.ForEach(psi.ArgumentList.Add);
+        using var p = Process.Start(psi);
     }
 
     /// <summary>Starts a detached daemon (used by the TUI's "keep running in background").</summary>

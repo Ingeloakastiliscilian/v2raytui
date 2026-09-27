@@ -67,8 +67,25 @@ public static class CoreUpdater
         return list;
     }
 
+    private static Task<bool>? _installTask;
+
+    /// <summary>A first-run download is in progress (the interface waits for it instead of starting another).</summary>
+    public static bool Installing => _installTask is { IsCompleted: false };
+
+    public static Task WaitInstallAsync() => _installTask ?? Task.CompletedTask;
+
     /// <summary>Downloads missing cores and geo files (first run).</summary>
-    public static async Task<bool> InstallMissingAsync(bool viaProxy, CancellationToken ct = default)
+    public static Task<bool> InstallMissingAsync(bool viaProxy, CancellationToken ct = default)
+    {
+        if (Installing)
+        {
+            return _installTask!;
+        }
+        _installTask = InstallMissingCoreAsync(viaProxy, ct);
+        return _installTask;
+    }
+
+    private static async Task<bool> InstallMissingCoreAsync(bool viaProxy, CancellationToken ct)
     {
         var ok = true;
         foreach (var core in MainCores.Where(c => !IsInstalled(c)))

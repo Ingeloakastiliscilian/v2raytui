@@ -40,6 +40,8 @@ internal sealed partial class MainWindow : Runnable
 
     public TuiExit ExitMode { get; private set; } = TuiExit.Quit;
 
+    internal void SetExitMode(TuiExit mode) => ExitMode = mode;
+
     private static Config Config => AppHost.Config;
 
     public MainWindow()
@@ -204,7 +206,12 @@ internal sealed partial class MainWindow : Runnable
         await LoadSubsAsync();
         await ReloadServersAsync();
 
-        if (CoreUpdater.MissingComponents() is { Count: > 0 } missing)
+        if (CoreUpdater.Installing)
+        {
+            LogBus.Notice(L("Downloading cores and geo files…", "Загрузка ядер и geo-файлов…"));
+            await CoreUpdater.WaitInstallAsync();
+        }
+        else if (CoreUpdater.MissingComponents() is { Count: > 0 } missing)
         {
             var yes = await OnUi(() => Dialogs.Confirm(App!, L("First run", "Первый запуск"),
                 L($"Missing: {string.Join(", ", missing)}.\nDownload now from GitHub?",
@@ -216,15 +223,29 @@ internal sealed partial class MainWindow : Runnable
         }
 
         CoreUpdater.WarnOutdatedCores();
-        await EnsureTunAccessAsync();
-        if (_rows.Count > 0 || await ConfigHandler.GetDefaultServer(Config) != null)
+        var pc = ProxyController.Instance;
+        // The interface may open over an instance that already runs (background / another terminal):
+        // the proxy is not restarted then, only TUN is brought up if it waits for the sudo password.
+        if (Config.TunModeItem.EnableTun && !pc.TunActive)
         {
-            await ProxyController.Instance.ReloadAsync();
+            var hadAccess = ProxyController.TunAllowed;
+            await EnsureTunAccessAsync();
+            if (!hadAccess && ProxyController.TunAllowed && pc.CoreRunning)
+            {
+                await pc.ReloadAsync();
+            }
         }
-        else
+        if (!pc.CoreRunning)
         {
-            LogBus.Notice(L("No servers yet: press `a` in Subscriptions to add one, or paste share links (p).",
-                "Серверов пока нет: добавьте подписку (`a` в панели подписок) или вставьте ссылки (p)."));
+            if (_rows.Count > 0 || await ConfigHandler.GetDefaultServer(Config) != null)
+            {
+                await pc.ReloadAsync();
+            }
+            else
+            {
+                LogBus.Notice(L("No servers yet: press `a` in Subscriptions to add one, or paste share links (p).",
+                    "Серверов пока нет: добавьте подписку (`a` в панели подписок) или вставьте ссылки (p)."));
+            }
         }
         BackgroundScheduler.Instance.Start();
         ProxyController.Instance.StartWatchdog();

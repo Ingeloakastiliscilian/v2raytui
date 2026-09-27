@@ -196,6 +196,21 @@ public sealed class TestService
         return job;
     }
 
+    /// <summary>Cancels all jobs and waits for their core processes to be stopped (no orphans on exit).</summary>
+    public async Task StopAllAsync()
+    {
+        var running = RunningJobs;
+        StopAll();
+        try
+        {
+            await Task.WhenAll(running.Select(j => j.Completion)).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch
+        {
+            // timeout / job errors: nothing more to do
+        }
+    }
+
     public void StopAll(bool includeBackground = true)
     {
         foreach (var j in RunningJobs.Where(j => includeBackground || !j.Background))

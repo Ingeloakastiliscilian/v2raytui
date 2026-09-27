@@ -141,7 +141,63 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
 """));
     }
 
+    /// <summary>
+    /// Linux: the interface of a background instance (started here if none runs) is opened in this terminal.
+    /// The proxy, TUN and background work live in that instance; closing the window keeps them running.
+    /// </summary>
     private static async Task<int> RunTuiAsync(ArgList args)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return await RunTuiInProcessAsync(args);
+        }
+        if (!UnixFd.IsTerminal(0) || !UnixFd.IsTerminal(1))
+        {
+            Console.Error.WriteLine(L("The interface needs a terminal (stdin/stdout).", "Интерфейсу нужен терминал (stdin/stdout)."));
+            return 2;
+        }
+
+        var socketPath = AttachHost.SocketPath;
+        var owner = InstanceLock.ReadOwner();
+        if (owner is { } o && o.Mode != "daemon")
+        {
+            if (o.Mode == "tui" && !File.Exists(socketPath))
+            {
+                // An interface of an older version (not attachable) is open.
+                Console.Write(L($"An older v2rayn-tui is running (pid {o.Pid}). Stop it and continue? [Y/n] ",
+                    $"Запущен v2rayn-tui старой версии (pid {o.Pid}). Остановить его и продолжить? [Y/n] "));
+                var answer = Console.ReadLine()?.Trim().ToLowerInvariant();
+                if (answer is not ("" or "y" or "yes" or "д" or "да" or null) || !await InstanceLock.StopOwnerAsync(TimeSpan.FromSeconds(20)))
+                {
+                    return 1;
+                }
+                owner = null;
+            }
+            else
+            {
+                Console.Error.WriteLine(L($"Busy: a `{o.Mode}` command runs (pid {o.Pid}). Try again when it ends.",
+                    $"Занято: выполняется команда `{o.Mode}` (pid {o.Pid}). Повторите, когда она завершится."));
+                return 1;
+            }
+        }
+
+        var started = false;
+        if (owner is null)
+        {
+            if (InstanceLock.FindForeignCore() is { } foreign)
+            {
+                Console.Error.WriteLine(L($"A core from this data directory is already running (pid {foreign.Pid}). Is v2rayN GUI open on the same data?",
+                    $"Ядро из этого каталога данных уже запущено (pid {foreign.Pid}). Открыт GUI v2rayN на тех же данных?"));
+                return 1;
+            }
+            Console.WriteLine(L("Starting v2rayn-tui in the background…", "Запуск v2rayn-tui в фоне…"));
+            Daemon.SpawnServer();
+            started = true;
+        }
+        return await AttachClient.RunAsync(socketPath, started);
+    }
+
+    private static async Task<int> RunTuiInProcessAsync(ArgList args)
     {
         var lk = InstanceLock.TryAcquire("tui", out var err);
         if (lk is null)
