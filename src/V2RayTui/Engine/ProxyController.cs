@@ -36,6 +36,25 @@ public sealed class ProxyController
 
     private static Config Config => AppHost.Config;
 
+    /// <summary>
+    /// Builds the core configs for <paramref name="profile"/> the way the running core gets them: on a copy of
+    /// the shared config (TUN on/off, TUN via sing-box, DNS of the current network), nothing is saved.
+    /// </summary>
+    public async Task<CoreConfigContextBuilderAllResult> BuildAsync(ProfileItem profile, bool tun)
+    {
+        var buildConfig = JsonUtils.DeepCopy(Config)!;
+        buildConfig.TunModeItem.EnableTun = tun;
+        if (AppHost.Settings.TunViaSingBox)
+        {
+            buildConfig.TunModeItem.EnableLegacyProtect = true;
+        }
+        // Read fresh on every build — turning TUN on included: in TUN mode every DNS query of the system
+        // goes to the core, so it must have the DNS of the network we are on right now.
+        var net = ApplyNetworkDns(buildConfig, tun);
+        var all = await CoreConfigContextBuilder.BuildAll(buildConfig, profile);
+        return WithLocalDomainsDirect(all, net);
+    }
+
     public async Task ReloadAsync()
     {
         if (!await _reloadGate.WaitAsync(0))
@@ -68,15 +87,7 @@ public sealed class ProxyController
                     : Loc.T("TUN is on but no sudo access in this session — starting without TUN",
                         "TUN включён, но в этом сеансе нет доступа sudo — запуск без TUN"));
             }
-            var buildConfig = JsonUtils.DeepCopy(Config)!;
-            buildConfig.TunModeItem.EnableTun = tunWanted && !tunSuppressed;
-            if (AppHost.Settings.TunViaSingBox)
-            {
-                buildConfig.TunModeItem.EnableLegacyProtect = true;
-            }
-            var net = ApplyNetworkDns(buildConfig);
-            var all = await CoreConfigContextBuilder.BuildAll(buildConfig, profile);
-            all = WithLocalDomainsDirect(all, net);
+            var all = await BuildAsync(profile, tunWanted && !tunSuppressed);
             _tunInterface = all.PreSocksResult?.Context.IsTunEnabled == true || all.MainResult.Context.RunCoreType == ECoreType.sing_box
                 ? "singbox_tun"
                 : "xray_tun";
@@ -751,14 +762,14 @@ public sealed class ProxyController
     /// "DNS from the network": its servers become the direct and bootstrap DNS of this build (a copy of the
     /// config — the saved DNS settings stay and apply again when no network DNS is found).
     /// </summary>
-    private NetworkInfo? ApplyNetworkDns(Config buildConfig)
+    private NetworkInfo? ApplyNetworkDns(Config buildConfig, bool tun)
     {
         NetworkDnsText = "";
         if (!AppHost.Settings.DnsFromNetwork)
         {
             return null;
         }
-        var net = NetworkMonitor.Instance.Current.IsUp ? NetworkMonitor.Instance.Current : NetworkMonitor.Read();
+        var net = NetworkMonitor.Read();
         if (net.DnsServers.Count == 0)
         {
             LogBus.Write("[dns] " + Loc.T("no DNS servers from the network — using the DNS settings",
@@ -771,10 +782,11 @@ public sealed class ProxyController
         // (a corporate firewall may drop public resolvers).
         buildConfig.SimpleDNSItem.BootstrapDNS = servers;
         NetworkDnsText = servers + (net.SearchDomains.Count > 0 ? " · " + string.Join(", ", net.SearchDomains) : "");
-        if (_loggedNetworkDns != NetworkDnsText)
+        var logKey = NetworkDnsText + (tun ? "|tun" : "");
+        if (_loggedNetworkDns != logKey)
         {
-            _loggedNetworkDns = NetworkDnsText;
-            LogBus.Write("[dns] " + Loc.T($"from the network: {NetworkDnsText}", $"из сети: {NetworkDnsText}"));
+            _loggedNetworkDns = logKey;
+            LogBus.Write("[dns] " + Loc.T($"from the network{(tun ? " (TUN)" : "")}: {NetworkDnsText}", $"из сети{(tun ? " (TUN)" : "")}: {NetworkDnsText}"));
         }
         return net;
     }

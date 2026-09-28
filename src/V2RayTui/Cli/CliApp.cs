@@ -48,6 +48,7 @@ public static class CliApp
                     return 0;
                 }),
                 "core" => await WithEngine("cli", () => CoreAsync(args)),
+                "config" => await ConfigAsync(args),
                 "geo" => await WithEngine("cli", async () =>
                 {
                     await CoreUpdater.UpdateGeoAsync(args.Has("--proxy"));
@@ -91,6 +92,7 @@ Usage: v2rayn-tui [--data DIR | --portable] [--lang en|ru] [command]
                                 parallel test; MODE: tcping | ping | speed | pingspeed
   use ID|NUM|best [-s SUB]      make server active (best = lowest delay)
   cycle                         run one background cycle now (subscriptions → tests → Alive group)
+  config [--tun|--no-tun] [--out DIR]  write the core configs the active server would run with (not started)
   sub list
   sub add URL [--name NAME] [--interval MIN]
   sub update [SUB] [--proxy] [--force]
@@ -124,6 +126,7 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
                                 параллельный тест; РЕЖИМ: tcping | ping | speed | pingspeed
   use ID|НОМЕР|best [-s ПОДП]   сделать сервер активным (best = мин. задержка)
   cycle                         выполнить фоновый цикл сейчас (подписки → тесты → группа Alive)
+  config [--tun|--no-tun] [--out КАТАЛОГ]  записать конфиги ядра для активного сервера (без запуска)
   sub list
   sub add URL [--name ИМЯ] [--interval МИН]
   sub update [ПОДП] [--proxy] [--force]
@@ -243,6 +246,45 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
             }
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Diagnostics: the configs the core would get right now (TUN as saved unless --tun/--no-tun, DNS of the
+    /// network…), written to a directory. Does not start anything and works next to a running instance.
+    /// </summary>
+    private static async Task<int> ConfigAsync(ArgList args)
+    {
+        if (!await AppHost.InitAsync(registerScheduledTasks: false))
+        {
+            return 1;
+        }
+        var profile = await ConfigHandler.GetDefaultServer(AppHost.Config);
+        if (profile == null)
+        {
+            Console.Error.WriteLine(L("No active server", "Нет активного сервера"));
+            return 1;
+        }
+        var tun = args.Has("--tun") || (!args.Has("--no-tun") && AppHost.Config.TunModeItem.EnableTun);
+        var dir = Path.GetFullPath(args.Get("--out") ?? "v2rayn-tui-config");
+        Directory.CreateDirectory(dir);
+        var all = await ProxyController.Instance.BuildAsync(profile, tun);
+        var written = new List<string>();
+        foreach (var (ctx, name) in new[] { (all.MainResult.Context, "config.json"), (all.PreSocksResult?.Context, "configPre.json") })
+        {
+            if (ctx == null)
+            {
+                continue;
+            }
+            var path = Path.Combine(dir, name);
+            var r = await CoreConfigHandler.GenerateClientConfig(ctx, path);
+            Console.WriteLine($"{name}: {ctx.RunCoreType}{(ctx.IsTunEnabled ? " + TUN" : "")} — {(r.Success ? path : r.Msg)}");
+            written.Add(path);
+        }
+        Console.WriteLine(L($"Server: {profile.GetSummary()}; TUN: {(tun ? "on" : "off")}", $"Сервер: {profile.GetSummary()}; TUN: {(tun ? "вкл" : "выкл")}"));
+        Console.WriteLine(ProxyController.Instance.NetworkDnsText.IsNotEmpty()
+            ? L($"DNS from the network: {ProxyController.Instance.NetworkDnsText}", $"DNS из сети: {ProxyController.Instance.NetworkDnsText}")
+            : L("DNS: from the DNS settings", "DNS: из настроек DNS"));
+        return written.Count > 0 ? 0 : 1;
     }
 
     /// <summary>Copies another data directory (e.g. a --portable one) into the current one.</summary>
