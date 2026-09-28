@@ -13,72 +13,33 @@ public enum TuiExit
 
 public static class TuiApp
 {
-    private static readonly Lock _gate = new();
-    private static IApplication? _app;
-    private static MainWindow? _main;
+    private static volatile MainWindow? _main;
 
-    /// <summary>Runs the interface on the current stdin/stdout terminal until the user leaves it.</summary>
-    public static TuiExit Run()
+    /// <summary>
+    /// Runs the interface on the current stdin/stdout terminal until the user leaves it, or until
+    /// <paramref name="detachWhen"/> turns true (polled on the UI thread; closes it as "Background").
+    /// </summary>
+    public static TuiExit Run(Func<bool>? detachWhen = null)
     {
         using var app = Application.Create().Init();
         Theme.Install();
-        using var main = new MainWindow();
-        lock (_gate)
-        {
-            _app = app;
-            _main = main;
-        }
+        using var main = new MainWindow { DetachWhen = detachWhen };
+        _main = main;
         try
         {
             app.Run(main);
         }
         finally
         {
-            lock (_gate)
-            {
-                _app = null;
-                _main = null;
-            }
+            _main = null;
         }
         return main.ExitMode;
     }
 
     /// <summary>
     /// Closes the interface from outside (another terminal took it over, or its terminal went away),
-    /// as "Background": the proxy keeps running.
+    /// as "Background": the proxy keeps running. Safe from any thread: only sets a flag that the UI thread
+    /// polls — calling into Terminal.Gui from here could block while a modal dialog is open.
     /// </summary>
-    public static void ForceDetach()
-    {
-        IApplication? app;
-        MainWindow? main;
-        lock (_gate)
-        {
-            app = _app;
-            main = _main;
-        }
-        if (app is null || main is null)
-        {
-            return;
-        }
-        main.SetExitMode(TuiExit.Detach);
-        app.Invoke(() => StopAll(app, main));
-    }
-
-    // Modal dialogs run nested loops: stop them one by one until the main window is gone.
-    private static void StopAll(IApplication app, MainWindow main)
-    {
-        if (!main.IsRunning)
-        {
-            return;
-        }
-        app.RequestStop();
-        app.AddTimeout(TimeSpan.FromMilliseconds(50), () =>
-        {
-            if (main.IsRunning)
-            {
-                app.RequestStop();
-            }
-            return main.IsRunning;
-        });
-    }
+    public static void ForceDetach() => _main?.RequestDetach();
 }

@@ -230,7 +230,12 @@ public sealed class AttachHost
                     UnixFd.close(fd);
                 }
                 LogBus.WriteFileOnly("[attach] interface opened");
-                exit = TuiApp.Run();
+                if (_reason == '\0')
+                {
+                    // (Ended before the window existed — taken over or the terminal is already gone.)
+                    // End() only sets _reason; the UI thread polls it, no cross-thread calls into Terminal.Gui.
+                    exit = TuiApp.Run(() => _reason != '\0');
+                }
             }
             catch (Exception ex)
             {

@@ -210,6 +210,7 @@ public sealed class TestService
         {
             // timeout / job errors: nothing more to do
         }
+        await StopAllCoresAsync();
     }
 
     public void StopAll(bool includeBackground = true)
@@ -446,6 +447,39 @@ public sealed class TestService
     }
 
     private static readonly ConcurrentDictionary<string, byte> _rejectedLogged = new();
+
+    // Every test / probe core that is running, so that shutdown can stop the ones whose task did not get
+    // to its own cleanup (a probe started a second before exit left an orphan that blocked the next start).
+    private static readonly ConcurrentDictionary<ProcessService, byte> _liveCores = new();
+
+    private static ProcessService? Track(ProcessService? proc)
+    {
+        if (proc != null)
+        {
+            _liveCores[proc] = 0;
+        }
+        return proc;
+    }
+
+    private static async Task StopCoreAsync(ProcessService? proc)
+    {
+        if (proc == null || !_liveCores.TryRemove(proc, out _))
+        {
+            return;
+        }
+        try
+        {
+            await proc.StopAsync();
+            proc.Dispose();
+        }
+        catch
+        {
+            // ignored
+        }
+    }
+
+    /// <summary>Stops every test core still running (called on shutdown after the jobs were cancelled).</summary>
+    public static Task StopAllCoresAsync() => Task.WhenAll(_liveCores.Keys.ToList().Select(StopCoreAsync));
     private static DateTime _lastCleanup;
 
     /// <summary>
@@ -492,9 +526,9 @@ public sealed class TestService
                 try
                 {
                     AppHost.LastTestCoreError = null;
-                    proc = multi
+                    proc = Track(multi
                         ? await CoreManager.Instance.LoadCoreConfigSpeedtest(batch)
-                        : await CoreManager.Instance.LoadCoreConfigSpeedtest(batch[0]);
+                        : await CoreManager.Instance.LoadCoreConfigSpeedtest(batch[0]));
                     if (proc != null)
                     {
                         await WaitForListenersAsync(proc, batch, ct);
@@ -539,18 +573,7 @@ public sealed class TestService
             }
             finally
             {
-                if (proc != null)
-                {
-                    try
-                    {
-                        await proc.StopAsync();
-                        proc.Dispose();
-                    }
-                    catch
-                    {
-                        // ignored
-                    }
-                }
+                await StopCoreAsync(proc);
             }
         }
 
@@ -637,25 +660,25 @@ public sealed class TestService
             CoreType = AppManager.Instance.GetCoreType(profile, profile.ConfigType),
         };
         ProcessService? proc = null;
-        await _coreStartGate.WaitAsync(ct);
         try
         {
-            proc = await CoreManager.Instance.LoadCoreConfigSpeedtest(item);
-            if (proc != null)
+            await _coreStartGate.WaitAsync(ct);
+            try
             {
-                await WaitForListenersAsync(proc, [item], ct);
+                proc = Track(await CoreManager.Instance.LoadCoreConfigSpeedtest(item));
+                if (proc != null)
+                {
+                    await WaitForListenersAsync(proc, [item], ct);
+                }
             }
-        }
-        finally
-        {
-            _coreStartGate.Release();
-        }
-        if (proc == null || proc.HasExited)
-        {
-            return (-1, null);
-        }
-        try
-        {
+            finally
+            {
+                _coreStartGate.Release();
+            }
+            if (proc == null || proc.HasExited)
+            {
+                return (-1, null);
+            }
             var proxy = new WebProxy($"socks5://{Global.Loopback}:{item.Port}");
             var delay = -1;
             for (var i = 0; i < 2 && delay <= 0; i++)
@@ -667,15 +690,7 @@ public sealed class TestService
         }
         finally
         {
-            try
-            {
-                await proc.StopAsync();
-                proc.Dispose();
-            }
-            catch
-            {
-                // ignored
-            }
+            await StopCoreAsync(proc);
         }
     }
 

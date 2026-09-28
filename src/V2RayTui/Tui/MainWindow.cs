@@ -192,6 +192,7 @@ internal sealed partial class MainWindow : Runnable
         App!.Keyboard.KeyDown += OnGlobalKey;
         App!.Paste += OnPaste;
         App!.AddTimeout(TimeSpan.FromMilliseconds(250), Tick);
+        App!.AddTimeout(TimeSpan.FromMilliseconds(20), DrainUiQueue);
         SuppressKittyKeyboardProtocol();
 
         _table.SetFocus();
@@ -910,11 +911,17 @@ internal sealed partial class MainWindow : Runnable
         });
     }
 
-    /// <summary>Executes on the UI thread and returns the result to the calling (worker) thread.</summary>
+    /// <summary>
+    /// Executes on the UI thread and returns the result to the calling (worker) thread.
+    /// Not <c>App.Invoke</c>: Terminal.Gui runs timer callbacks under its timer lock, so while a modal dialog
+    /// opened from such a callback is shown (TUN password, confirmations, DNS…), every other thread calling
+    /// Invoke/AddTimeout blocks — a stuck `stop` or terminal takeover. Work goes through a lock-free queue
+    /// that the UI thread drains itself (<see cref="DrainUiQueue"/>).
+    /// </summary>
     private Task<T> OnUi<T>(Func<T> func)
     {
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        App!.Invoke(() =>
+        _uiQueue.Enqueue(() =>
         {
             try
             {
@@ -926,6 +933,45 @@ internal sealed partial class MainWindow : Runnable
             }
         });
         return tcs.Task;
+    }
+
+    private readonly ConcurrentQueue<Action> _uiQueue = new();
+    private volatile bool _detachRequested;
+
+    /// <summary>Called from any thread: close the interface as "Background" (see <see cref="TuiApp.ForceDetach"/>).</summary>
+    internal void RequestDetach()
+    {
+        ExitMode = TuiExit.Detach;
+        _detachRequested = true;
+    }
+
+    // Repeating UI-thread timer. Each queued item gets its own one-shot timer (added from the UI thread, so the
+    // lock is re-entrant): an item that opens a modal dialog does not stop this timer, and the nested loop of
+    // the dialog keeps draining the queue.
+    /// <summary>Polled on the UI thread: an external reason to close as "Background" (e.g. the attach session ended).</summary>
+    internal Func<bool>? DetachWhen { get; init; }
+
+    private bool DrainUiQueue()
+    {
+        if (!_detachRequested && DetachWhen?.Invoke() == true)
+        {
+            RequestDetach();
+        }
+        if (_detachRequested)
+        {
+            // Modal dialogs run nested loops: stop the top one each time until the main window is gone.
+            App!.RequestStop();
+            return IsRunning;
+        }
+        while (_uiQueue.TryDequeue(out var action))
+        {
+            App!.AddTimeout(TimeSpan.Zero, () =>
+            {
+                action();
+                return false;
+            });
+        }
+        return true;
     }
 
     #endregion helpers

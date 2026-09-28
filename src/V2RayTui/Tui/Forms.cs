@@ -77,6 +77,36 @@ internal sealed class Form : IDisposable
         return () => current;
     }
 
+    /// <summary>A text field with a "▾" button that fills it from ready-made values (free text still allowed).</summary>
+    public TextField Combo(string label, string? value, IReadOnlyList<string> presets)
+    {
+        AddLabel(label);
+        var tf = new TextField { X = _labelWidth + 2, Y = _y, Width = Dim.Fill(9), Text = value ?? "" };
+        var btn = new Button { X = Pos.Right(tf) + 1, Y = _y++, Text = "▾", ShadowStyle = ShadowStyles.None };
+        btn.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            var items = presets.Select(x => x.IsNullOrEmpty() ? Loc.T("(empty)", "(пусто)") : x).ToList();
+            var current = presets.ToList().IndexOf(tf.Text.Trim());
+            if (_dlg.App is { } app && Dialogs.Choose(app, label, items, Math.Max(0, current)) is { } i)
+            {
+                tf.Text = presets[i];
+                tf.SetFocus();
+            }
+        };
+        Track(tf);
+        Track(btn);
+        return tf;
+    }
+
+    /// <summary><see cref="Picker"/> over string values; "" is shown as "(not set)".</summary>
+    public Func<string> Choice(string label, IReadOnlyList<string> values, string? value)
+    {
+        var shown = values.Select(x => x.IsNullOrEmpty() ? Loc.T("(not set)", "(не задано)") : x).ToList();
+        var pick = Picker(label, shown, Math.Max(0, values.ToList().IndexOf(value ?? "")));
+        return () => values[pick()];
+    }
+
 #pragma warning disable CS0618 // TextView is obsolete in favour of an external editor package, but fine here.
     /// <summary>Multi-line text (one item per line).</summary>
     public TextView MultiText(string label, string? value, int height)
@@ -124,10 +154,32 @@ internal sealed class Form : IDisposable
         return () => current;
     }
 
+    /// <summary>Several action buttons on one row, after a label; an action may return a new button text.</summary>
+    public void Actions(string label, params (string Text, Func<IApplication, string?> Action)[] actions)
+    {
+        AddLabel(label);
+        View? prev = null;
+        foreach (var (text, action) in actions)
+        {
+            var btn = new Button { X = prev is null ? _labelWidth + 2 : Pos.Right(prev) + 1, Y = _y, Text = text, ShadowStyle = ShadowStyles.None };
+            btn.Accepting += (_, e) =>
+            {
+                e.Handled = true;
+                if (_dlg.App is { } app && action(app) is { } newText)
+                {
+                    btn.Text = newText;
+                }
+            };
+            Track(btn);
+            prev = btn;
+        }
+        _y++;
+    }
+
     /// <summary>A plain action button on its own row (e.g. "pick from running processes").</summary>
     public void Action(string text, Action<IApplication> action)
     {
-        var btn = new Button { X = _labelWidth + 2, Y = _y++, Text = text };
+        var btn = new Button { X = _labelWidth + 2, Y = _y++, Text = text, ShadowStyle = ShadowStyles.None };
         btn.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -155,7 +207,8 @@ internal sealed class Form : IDisposable
         {
             _buttonsAdded = true;
             _dlg.AddButton(new Button { Title = Loc.T("_Cancel", "_Отмена") });
-            var save = new Button { Title = Loc.T("_Save", "_Сохранить") };
+            // Default: Enter in a field saves (Space toggles check boxes, Tab moves).
+            var save = new Button { Title = Loc.T("_Save", "_Сохранить"), IsDefault = true };
             save.Accepting += (_, e) =>
             {
                 if (Validate?.Invoke() is { } error)
@@ -454,6 +507,170 @@ internal static class SettingsDialogs
             s.BackgroundEnabled = true;
         }
         AppHost.SaveSettings();
+        return true;
+    }
+
+    // Presets of v2rayN plus resolvers that work from Russia (its lists are China-oriented).
+    private static readonly string[] DirectDnsPresets =
+        ["77.88.8.8", "77.88.8.1", "https://common.dot.dns.yandex.net/dns-query", "localhost", .. Global.DomainDirectDNSAddress];
+
+    private static readonly string[] RemoteDnsPresets =
+        ["8.8.8.8,https://dns.google/dns-query,1.1.1.1", .. Global.DomainRemoteDNSAddress];
+
+    private static readonly string[] BootstrapDnsPresets = ["77.88.8.8", "8.8.8.8", "1.1.1.1", .. Global.DomainPureIPDNSAddress];
+
+    private static List<string> Distinct(IEnumerable<string> items) => items.Distinct().ToList();
+
+    /// <summary>
+    /// v2rayN "DNS settings", basic part (SimpleDNSItem): used for both cores unless a custom DNS
+    /// config is enabled for the core (<see cref="DnsCustom"/>).
+    /// </summary>
+    /// <param name="editCustom">Opens the custom config of a core; returns whether it is enabled now.</param>
+    public static bool Dns(IApplication app, bool rayCustom, bool sboxCustom, Func<IApplication, ECoreType, bool> editCustom)
+    {
+        var d = AppHost.Config.SimpleDNSItem;
+        using var f = new Form("DNS", 34, 110);
+        if (rayCustom || sboxCustom)
+        {
+            var which = rayCustom && sboxCustom ? "Xray, sing-box" : rayCustom ? "Xray" : "sing-box";
+            f.Note(L($"⚠ A custom DNS config is on for {which}: the settings below do not apply to it.",
+                     $"⚠ Для {which} включён пользовательский DNS-конфиг: настройки ниже к нему не применяются."));
+        }
+        f.Section(L("Servers", "Серверы"));
+        var direct = f.Combo(L("Direct DNS", "DNS для прямых подключений"), d.DirectDNS, Distinct(DirectDnsPresets));
+        var remote = f.Combo(L("Remote DNS (via proxy)", "Удалённый DNS (через прокси)"), d.RemoteDNS, Distinct(RemoteDnsPresets));
+        var boot = f.Combo(L("Bootstrap DNS (IP only)", "Bootstrap DNS (только IP)"), d.BootstrapDNS, Distinct(BootstrapDnsPresets));
+        f.Note(L("Several servers: comma-separated. Bootstrap resolves the names of DoH/DoT servers above.",
+                 "Несколько серверов — через запятую. Bootstrap разрешает имена DoH/DoT-серверов выше."));
+
+        f.Section(L("Resolution strategy", "Стратегия разрешения"));
+        var sFree = f.Choice(L("Direct targets", "Прямые соединения"), Global.DomainStrategy, d.Strategy4Freedom);
+        var sProxy = f.Choice(L("Proxied targets", "Через прокси"), Global.DomainStrategy, d.Strategy4Proxy);
+        var sDial = f.Choice(L("Proxy server address", "Адрес прокси-сервера"), Global.DomainStrategy, d.Strategy4ProxyDial);
+        f.Note(L("Not set / AsIs: system DNS / the remote server resolves. \"Proxy server address\" may cause loops.",
+                 "Не задано / AsIs: системный DNS / разрешает удалённый сервер. «Адрес прокси-сервера» может дать петлю."));
+
+        f.Section(L("Options", "Параметры"));
+        var fake = f.Check(L("FakeIP (global; filtering only in sing-box)", "FakeIP (глобально; фильтрация только в sing-box)"), d.FakeIP ?? false);
+        var fakeRange = f.Combo(L("FakeIP range", "Диапазон FakeIP"), d.FakeIPRange, Global.FakeIPRanges);
+        var blockSvcb = f.Check(L("Block SVCB/HTTPS queries (ECH, HTTP/3; always in Xray)", "Блокировать запросы SVCB/HTTPS (ECH, HTTP/3; в Xray всегда)"), d.BlockBindingQuery ?? false);
+        var blockAaaa = f.Check(L("Block AAAA (IPv6) queries", "Блокировать запросы AAAA (IPv6)"), d.BlockAAAAQuery ?? false);
+        var sysHosts = f.Check(L("Use the system hosts file", "Использовать системный файл hosts"), d.UseSystemHosts ?? false);
+        var commonHosts = f.Check(L("Add common DNS hosts", "Добавить стандартные записи hosts"), d.AddCommonHosts ?? false);
+        var parallel = f.Check(L("Parallel queries", "Параллельные запросы"), d.ParallelQuery ?? false);
+        var stale = f.Check(L("Serve stale records", "Отдавать устаревшие записи (serve stale)"), d.ServeStale ?? false);
+        var happy = f.Check(L("Happy Eyeballs (needs UseIP strategy)", "Happy Eyeballs (нужна стратегия UseIP)"), d.EnableHappyEyeballs ?? false);
+        var expected = f.Combo(L("Expected IPs (e.g. geoip:ru)", "Ожидаемые IP (напр. geoip:ru)"), d.DirectExpectedIPs, Global.ExpectedIPs);
+        var hosts = f.MultiText(L("Hosts: domain ip1 ip2", "Hosts: домен ip1 ip2"), d.Hosts, 3);
+        static string Label(string core, bool on) => L($"{core}… ({(on ? "on" : "off")})", $"{core}… ({(on ? "вкл" : "выкл")})");
+        f.Actions(L("Custom JSON (replaces this)", "Свой JSON (вместо этого)"),
+            (Label("Xray", rayCustom), a => Label("Xray", editCustom(a, ECoreType.Xray))),
+            (Label("sing-box", sboxCustom), a => Label("sing-box", editCustom(a, ECoreType.sing_box))));
+
+        f.Validate = () =>
+        {
+            if (direct.Text.Trim().IsNullOrEmpty() || remote.Text.Trim().IsNullOrEmpty())
+            {
+                return L("Direct and remote DNS must not be empty.", "DNS для прямых и удалённый DNS не должны быть пустыми.");
+            }
+            var b = boot.Text.Trim();
+            if (b.IsNotEmpty() && b != "localhost" && Utils.String2List(b)?.Any(x => !System.Net.IPAddress.TryParse(x.Trim(), out _)) == true)
+            {
+                return L("Bootstrap DNS: IP addresses only.", "Bootstrap DNS — только IP-адреса.");
+            }
+            if (Form.Bool(fake) && !System.Net.IPNetwork.TryParse(fakeRange.Text.Trim(), out _))
+            {
+                return L("FakeIP range: a CIDR, e.g. 198.18.0.0/15.", "Диапазон FakeIP — CIDR, например 198.18.0.0/15.");
+            }
+            return null;
+        };
+        if (!f.Run(app))
+        {
+            return false;
+        }
+        d.DirectDNS = direct.Text.Trim();
+        d.RemoteDNS = remote.Text.Trim();
+        d.BootstrapDNS = boot.Text.Trim();
+        d.Strategy4Freedom = sFree();
+        d.Strategy4Proxy = sProxy();
+        d.Strategy4ProxyDial = sDial();
+        d.FakeIP = Form.Bool(fake);
+        d.FakeIPRange = fakeRange.Text.Trim();
+        d.BlockBindingQuery = Form.Bool(blockSvcb);
+        d.BlockAAAAQuery = Form.Bool(blockAaaa);
+        d.UseSystemHosts = Form.Bool(sysHosts);
+        d.AddCommonHosts = Form.Bool(commonHosts);
+        d.ParallelQuery = Form.Bool(parallel);
+        d.ServeStale = Form.Bool(stale);
+        d.EnableHappyEyeballs = Form.Bool(happy);
+        d.DirectExpectedIPs = expected.Text.Trim();
+        d.Hosts = hosts.Text.Replace("\r", "").Trim();
+        return true;
+    }
+
+    /// <summary>v2rayN's "custom DNS" for one core: its own JSON "dns" object instead of the basic settings.</summary>
+    public static bool DnsCustom(IApplication app, DNSItem item)
+    {
+        var ray = item.CoreType == ECoreType.Xray;
+        using var f = new Form(L($"Custom DNS — {(ray ? "Xray" : "sing-box")}", $"Свой DNS — {(ray ? "Xray" : "sing-box")}"), 30, 110);
+        var on = f.Check(L("Use this config instead of the basic settings", "Использовать этот конфиг вместо основных настроек"), item.Enabled);
+        CheckBox? sysHosts = ray ? f.Check(L("Use the system hosts file", "Использовать системный файл hosts"), item.UseSystemHosts) : null;
+        var strategy = f.Choice(ray ? L("Direct outbound strategy", "Стратегия прямого выхода") : L("Outbound strategy", "Стратегия выхода"),
+            ray ? Global.DomainStrategy : Global.DomainStrategies4Sbox, item.DomainStrategy4Freedom);
+        var addr = f.Combo(L("Outbound DNS address", "Исходящий DNS-адрес"), item.DomainDNSAddress, Distinct(BootstrapDnsPresets));
+        var normal = f.MultiText(L("DNS object (JSON)", "Объект dns (JSON)"), item.NormalDNS, 9);
+        var tun = f.MultiText(L("DNS object in TUN mode", "Объект dns в режиме TUN"), item.TunDNS, 6);
+        f.Action(L("Load the default config", "Загрузить стандартный конфиг"), _ =>
+        {
+            normal.Text = EmbedUtils.GetEmbedText(ray ? Global.DNSV2rayNormalFileName : Global.DNSSingboxNormalFileName);
+            tun.Text = EmbedUtils.GetEmbedText(ray ? Global.DNSV2rayNormalFileName : Global.TunSingboxDNSFileName);
+        });
+        f.Note(ray
+            ? L("  Format: https://xtls.github.io/config/dns.html", "  Формат: https://xtls.github.io/config/dns.html")
+            : L("  Format: https://sing-box.sagernet.org/configuration/dns/", "  Формат: https://sing-box.sagernet.org/configuration/dns/"));
+
+        string? Check(string text)
+        {
+            text = text.Trim();
+            if (text.IsNullOrEmpty())
+            {
+                return null;
+            }
+            if (ray)
+            {
+                return JsonUtils.ParseJson(text) is System.Text.Json.Nodes.JsonObject o && o["servers"] != null
+                    ? null
+                    : L("Xray: a JSON object with \"servers\" is expected.", "Xray: нужен JSON-объект с полем \"servers\".");
+            }
+            var sb = JsonUtils.Deserialize<Dns4Sbox>(text);
+            return sb?.servers is { Count: > 0 } servers && servers.All(x => x.type.IsNotEmpty())
+                ? null
+                : L("sing-box: \"servers\" with a \"type\" for each server is expected.", "sing-box: нужно поле \"servers\", у каждого сервера — \"type\".");
+        }
+        f.Validate = () =>
+        {
+            if (Form.Bool(on) && normal.Text.Trim().IsNullOrEmpty())
+            {
+                return L("The DNS object is empty: load the default config or turn this off.", "Объект dns пуст: загрузите стандартный конфиг или выключите.");
+            }
+            return Check(normal.Text) ?? Check(tun.Text);
+        };
+        if (!f.Run(app))
+        {
+            return false;
+        }
+        item.Enabled = Form.Bool(on);
+        if (sysHosts != null)
+        {
+            item.UseSystemHosts = Form.Bool(sysHosts);
+        }
+        item.DomainStrategy4Freedom = strategy();
+        item.DomainDNSAddress = addr.Text.Trim();
+        var n = normal.Text.Trim();
+        var t = tun.Text.Trim();
+        // As v2rayN saves it: sing-box configs normalized through its model.
+        item.NormalDNS = ray || n.IsNullOrEmpty() ? n : JsonUtils.Serialize(JsonUtils.Deserialize<Dns4Sbox>(n));
+        item.TunDNS = ray || t.IsNullOrEmpty() ? t : JsonUtils.Serialize(JsonUtils.Deserialize<Dns4Sbox>(t));
         return true;
     }
 

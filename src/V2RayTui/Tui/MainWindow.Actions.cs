@@ -894,9 +894,15 @@ internal sealed partial class MainWindow
             L("Background (schedule, subscriptions, auto switch)", "Фоновый режим (расписание, подписки, автопереключение)"),
             L("Alive group (live fast servers)", "Группа Alive (живые быстрые серверы)"),
             L("Local proxy (ports, LAN, sniffing, TUN, logs)", "Локальный прокси (порты, LAN, sniffing, TUN, логи)"),
+            L("DNS", "DNS"),
             L("Test URLs & timeouts", "URL и таймауты тестов"),
             L("Regional preset (routing / geo / DNS)", "Региональный пресет (маршруты / geo / DNS)"),
         ]);
+        if (sel == 4)
+        {
+            DnsSettings();
+            return;
+        }
         if (sel == 2)
         {
             var wasOn = AppHost.Settings.AliveEnabled;
@@ -913,7 +919,7 @@ internal sealed partial class MainWindow
             }
             return;
         }
-        if (sel == 5)
+        if (sel == 6)
         {
             var presets = Enum.GetValues<EPresetType>();
             if (Dialogs.Choose(App!, L("Regional preset", "Региональный пресет"), presets.Select(p => p.ToString()).ToList()) is { } pi)
@@ -931,7 +937,7 @@ internal sealed partial class MainWindow
             0 => SettingsDialogs.Tests(App!),
             1 => SettingsDialogs.Background(App!, _subs),
             3 => SettingsDialogs.Proxy(App!),
-            4 => SettingsDialogs.TestUrls(App!),
+            5 => SettingsDialogs.TestUrls(App!),
             _ => false,
         };
         if (!changed)
@@ -945,6 +951,47 @@ internal sealed partial class MainWindow
         {
             Fire(ProxyController.Instance.ReloadAsync);
         }
+    }
+
+    /// <summary>F2 → DNS: basic settings (both cores) and custom DNS configs per core; the core is restarted.</summary>
+    private void DnsSettings()
+    {
+        Fire(async () =>
+        {
+            async Task<DNSItem> Load(ECoreType type) =>
+                await AppManager.Instance.GetDNSItem(type)
+                ?? new DNSItem { CoreType = type, Remarks = type == ECoreType.Xray ? "V2ray" : "sing-box" };
+            var ray = await Load(ECoreType.Xray);
+            var sbox = await Load(ECoreType.sing_box);
+            var customChanged = new List<DNSItem>();
+
+            var saved = await OnUi(() => SettingsDialogs.Dns(App!, ray.Enabled, sbox.Enabled, (app, type) =>
+            {
+                var item = type == ECoreType.Xray ? ray : sbox;
+                if (SettingsDialogs.DnsCustom(app, item) && !customChanged.Contains(item))
+                {
+                    customChanged.Add(item);
+                }
+                return item.Enabled;
+            }));
+            foreach (var item in customChanged)
+            {
+                await ConfigHandler.SaveDNSItems(Config, item);
+            }
+            if (saved)
+            {
+                await ConfigHandler.SaveConfig(Config);
+            }
+            if (!saved && customChanged.Count == 0)
+            {
+                return;
+            }
+            LogBus.Notice(L("DNS settings saved", "Настройки DNS сохранены"));
+            if (ProxyController.Instance.CoreRunning)
+            {
+                await ProxyController.Instance.ReloadAsync();
+            }
+        });
     }
 
     private void QuitDialog()
@@ -995,7 +1042,7 @@ Import                                    Subscriptions (left pane, Tab to switc
   (terminal paste into the window works too)
 
 Proxy                                     Other
-  F5 restart core     F6 stop core          F2  settings             l  log size
+  F5 restart core     F6 stop core          F2  settings, DNS        l  log size
   F3 system proxy     F4 routing rules      F8  update cores / geo   w  copy proxy env vars
   F7 TUN (sudo)                             n   check connection: delay, exit IP, country vs name
                                             q F10  quit / keep running in background
@@ -1025,7 +1072,7 @@ Hotkeys also work with the Russian keyboard layout.
   (можно просто вставить текст в окно терминала)
 
 Прокси                                    Прочее
-  F5 перезапуск ядра  F6 остановить ядро    F2  настройки            l  размер журнала
+  F5 перезапуск ядра  F6 остановить ядро    F2  настройки, DNS       l  размер журнала
   F3 системный прокси F4 правила маршрутов  F8  обновить ядра / geo  w  скопировать переменные прокси
   F7 TUN (sudo)                             n   проверить подключение: задержка, IP, страна vs название
                                             q F10  выход / оставить работать в фоне

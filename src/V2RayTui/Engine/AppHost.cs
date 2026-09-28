@@ -295,6 +295,8 @@ public static class AppHost
             return;
         }
         _initialized = false;
+        // Probes (connection check after a reload) are not jobs: stop their cores too.
+        await TestService.StopAllCoresAsync();
         try
         {
             await AppManager.Instance.AppExitAsync(false);

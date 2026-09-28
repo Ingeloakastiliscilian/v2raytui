@@ -82,6 +82,10 @@ public sealed class InstanceLock : IDisposable
                 var parts = cmdline.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Any(a => a.StartsWith(binDir, StringComparison.Ordinal)))
                 {
+                    if (StopIfOrphan(pid, cmdline))
+                    {
+                        continue;
+                    }
                     return (pid, cmdline.Length > 120 ? cmdline[..120] + "…" : cmdline);
                 }
             }
@@ -91,6 +95,41 @@ public sealed class InstanceLock : IDisposable
             // ignored
         }
         return null;
+    }
+
+    /// <summary>
+    /// A core of this data directory whose parent is gone (a v2rayn-tui / v2rayN that crashed or was killed
+    /// before it stopped its cores) is ours to clean up: it only holds ports and would block the start.
+    /// A core under a live v2rayN GUI, or one we may not signal (TUN core running as root), is left alone.
+    /// </summary>
+    private static bool StopIfOrphan(int pid, string cmdline)
+    {
+        try
+        {
+            var stat = File.ReadAllText($"/proc/{pid}/stat");
+            var fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ');
+            var ppid = int.Parse(fields[1]);
+            var parent = ppid <= 1 ? "" : File.ReadAllText($"/proc/{ppid}/comm").Trim();
+            // Orphans are re-parented to init or a session subreaper (systemd --user etc.).
+            if (parent is "v2rayN" or "v2rayn-tui" or "dotnet" or "sudo")
+            {
+                return false;
+            }
+            if (sys_kill(pid, 15) != 0)
+            {
+                return false;
+            }
+            for (var i = 0; i < 30 && Directory.Exists($"/proc/{pid}"); i++)
+            {
+                Thread.Sleep(100);
+            }
+            LogBus.WriteFileOnly($"[lock] stopped an orphaned core (pid {pid}, parent {ppid} {parent}): {cmdline}");
+            return !Directory.Exists($"/proc/{pid}");
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static (int Pid, string Mode)? ReadOwner()
