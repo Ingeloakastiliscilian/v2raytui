@@ -169,8 +169,12 @@ public sealed class TestService
         _speedSlots.Limit = s.SpeedConcurrency;
     }
 
+    /// <param name="ownSpeedLimiter">
+    /// Background job with its own one-at-a-time speed slot instead of the shared one (Alive re-checks must not
+    /// wait behind a whole background cycle).
+    /// </param>
     public TestJob Start(string title, TestMode mode, IReadOnlyList<ProfileItem> items, bool background, int? speedTopN = null,
-        Action<string, int, decimal, string?>? onItemFinished = null, int? speedSeconds = null)
+        Action<string, int, decimal, string?>? onItemFinished = null, int? speedSeconds = null, bool ownSpeedLimiter = false)
     {
         ApplySettings(AppHost.Settings);
         CleanupStaleTestConfigs();
@@ -182,7 +186,7 @@ public sealed class TestService
             Background = background,
             SpeedTopN = speedTopN,
             // One limiter for all background jobs: a re-check running next to the main cycle must not double downloads.
-            SpeedLimiter = background ? _backgroundSpeedSlots : null,
+            SpeedLimiter = ownSpeedLimiter ? new AsyncLimiter(1) : background ? _backgroundSpeedSlots : null,
             OnItemFinished = onItemFinished,
             ForceIpInfo = onItemFinished != null,
             SpeedSeconds = speedSeconds,

@@ -146,6 +146,49 @@ public static class AliveGroup
         }
     }
 
+    private static bool _keptActiveNoticed;
+
+    /// <summary>
+    /// Removes a member. The active server is never removed while auto switching is off (the user's
+    /// connection is not changed behind their back); with auto switching the end-of-cycle sync moves on.
+    /// </summary>
+    internal static async Task<bool> DropCopyAsync(ProfileItem copy)
+    {
+        if (copy.IndexId == Config.IndexId)
+        {
+            if (S.AutoSwitch == AutoSwitchMode.Off && !_keptActiveNoticed)
+            {
+                _keptActiveNoticed = true;
+                LogBus.Notice("[alive] " + Loc.T(
+                    $"the active server {copy.Remarks} no longer qualifies — kept because auto switch is off",
+                    $"активный сервер {copy.Remarks} больше не проходит проверку — оставлен, т.к. автопереключение выключено"));
+            }
+            return false;
+        }
+        var fresh = await AppManager.Instance.GetProfileItem(copy.IndexId);
+        if (fresh != null)
+        {
+            await ConfigHandler.RemoveServers(Config, [fresh]);
+        }
+        AliveFailures.Clear(Key(copy));
+        LogBus.Write($"[alive] − {copy.Remarks}");
+        return true;
+    }
+
+    /// <summary>A member failed a check: count it; drop it after enough failures in a row.</summary>
+    internal static async Task<bool> FailAsync(string key, ProfileItem copy)
+    {
+        var (count, drop) = AliveFailures.Register(key, copy.Remarks ?? "");
+        if (drop)
+        {
+            return await DropCopyAsync(copy);
+        }
+        LogBus.Write("[alive] " + Loc.T(
+            $"? {copy.Remarks}: failed {count}/{S.AliveDropAfterFailures}, re-check in {S.AliveRetryMinutes} min",
+            $"? {copy.Remarks}: провал {count}/{S.AliveDropAfterFailures}, повтор через {S.AliveRetryMinutes} мин"));
+        return false;
+    }
+
     public sealed record SyncResult(int Total, int Added, int Removed, bool Skipped);
 
     /// <summary>Rebuilds the group from a finished ping+speed job over <paramref name="sources"/>.</summary>
@@ -188,7 +231,21 @@ public static class AliveGroup
             }
         }
         var keys = qualified.Select(q => q.Key).ToHashSet();
-        toRemove.AddRange(existingByKey.Where(kv => !keys.Contains(kv.Key)).Select(kv => kv.Value));
+        // A member that did not pass this time stays until it has failed enough checks in a row
+        // (AliveFailures, re-checked by the scheduler); one gone from the subscriptions leaves now.
+        var sourceKeys = sources.Where(p => IsCandidate(p, groupId)).Select(Key).ToHashSet();
+        var kept = new List<ProfileItem>();
+        foreach (var (key, copy) in existingByKey.Where(kv => !keys.Contains(kv.Key)))
+        {
+            if (!sourceKeys.Contains(key) || AliveFailures.Count(key) >= S.AliveDropAfterFailures)
+            {
+                toRemove.Add(copy);
+            }
+            else
+            {
+                kept.Add(copy);
+            }
+        }
 
         var order = new List<(string Id, int Delay, decimal Speed)>();
         var added = 0;
@@ -215,6 +272,11 @@ public static class AliveGroup
             // Let auto switching see the copies.
             job.Delays[id] = delay;
             job.Speeds[id] = speed;
+        }
+        // Failing members (still in the group) after the ones that passed.
+        for (var i = 0; i < kept.Count; i++)
+        {
+            ProfileExManager.Instance.SetSort(kept[i].IndexId, (order.Count + i + 1) * 10);
         }
 
         // The active server is about to be removed.
@@ -251,12 +313,15 @@ public static class AliveGroup
             await ConfigHandler.RemoveServers(Config, toRemove);
         }
         await ProfileExManager.Instance.SaveTo();
+        var removedIds = toRemove.Select(r => r.IndexId).ToHashSet();
+        AliveFailures.Retain(existingByKey.Where(kv => !removedIds.Contains(kv.Value.IndexId)).Select(kv => kv.Key).ToHashSet());
 
+        var failing = kept.Count > 0 ? Loc.T($", {kept.Count} failing (re-checked)", $", {kept.Count} не прошли (перепроверяются)") : "";
         LogBus.Notice("[alive] " + Loc.T(
-            $"{S.AliveName}: {order.Count} servers (+{added} −{toRemove.Count}), ≥ {S.AliveMinSpeed} MB/s",
-            $"{S.AliveName}: {order.Count} серверов (+{added} −{toRemove.Count}), ≥ {S.AliveMinSpeed} МБ/с"));
+            $"{S.AliveName}: {order.Count} servers (+{added} −{toRemove.Count}{failing}), ≥ {S.AliveMinSpeed} MB/s",
+            $"{S.AliveName}: {order.Count} серверов (+{added} −{toRemove.Count}{failing}), ≥ {S.AliveMinSpeed} МБ/с"));
         ProxyController.Instance.NotifyServersChanged();
-        return new SyncResult(order.Count + (keptActive ? 1 : 0), added, toRemove.Count, false);
+        return new SyncResult(order.Count + kept.Count + (keptActive ? 1 : 0), added, toRemove.Count, false);
     }
 }
 
@@ -278,13 +343,11 @@ public sealed class AliveSession
     private int _handled;
     private readonly Dictionary<string, decimal> _bestSpeed = new();
     private readonly Dictionary<string, ProfileItem> _copies = new();
-    private readonly List<string> _deferredDrops = [];
-    private readonly HashSet<string> _retryKeys = [];
-    /// <summary>Keys being re-checked: failing now removes them from the group.</summary>
-    private readonly HashSet<string> _retryingKeys = [];
+    // Failures seen before any server passed: counted only once our own network is known to work.
+    private readonly List<string> _deferredFailures = [];
     private readonly Lock _gate = new();
     private Task _chain = Task.CompletedTask;
-    private bool _keptActiveNoticed;
+    private CancellationToken _cycle;
 
     private AliveSession(string groupId, IEnumerable<ProfileItem> sources)
     {
@@ -294,16 +357,21 @@ public sealed class AliveSession
 
     public int Count => _copies.Count;
 
+    /// <summary>Keys of the group members when the session started.</summary>
+    public IReadOnlySet<string> MemberKeys { get; private set; } = new HashSet<string>();
+
     /// <param name="sources">All servers of the cycle (duplicates included).</param>
     /// <param name="tested">The ones actually tested (one per distinct server).</param>
-    public static async Task<AliveSession> StartAsync(IReadOnlyList<ProfileItem> sources, IReadOnlyList<ProfileItem> tested)
+    /// <param name="cycle">Cancelled when the cycle is interrupted: results after that are not failures.</param>
+    public static async Task<AliveSession> StartAsync(IReadOnlyList<ProfileItem> sources, IReadOnlyList<ProfileItem> tested, CancellationToken cycle = default)
     {
         var groupId = await AliveGroup.EnsureAsync();
-        var session = new AliveSession(groupId, sources);
+        var session = new AliveSession(groupId, sources) { _cycle = cycle };
         foreach (var copy in await AppManager.Instance.ProfileItems(groupId) ?? [])
         {
             session._copies.TryAdd(AliveGroup.Key(copy), copy);
         }
+        session.MemberKeys = session._copies.Keys.ToHashSet();
         foreach (var p in session._sources.Values)
         {
             var key = AliveGroup.Key(p);
@@ -431,36 +499,35 @@ public sealed class AliveSession
                     ProfileExManager.Instance.SetTestIpInfo(copy.IndexId, ipInfo);
                 }
                 TestService.Instance.Publish(new TestUpdate(copy.IndexId, Delay: delay, Speed: _bestSpeed[key], DelayStatus: "", SpeedStatus: "", IpInfo: ipInfo));
+                if (AliveFailures.Clear(key))
+                {
+                    LogBus.Write("[alive] " + Loc.T($"✓ {copy.Remarks} passes again", $"✓ {copy.Remarks} снова проходит"));
+                }
                 await AliveGroup.ResortAsync();
                 if (first)
                 {
-                    // The network works: now it is safe to drop what failed so far.
-                    foreach (var k in _deferredDrops.ToList())
+                    // The network works: the failures seen so far are real.
+                    foreach (var k in _deferredFailures.ToList())
                     {
-                        await DropAsync(k);
+                        await FailAsync(k);
                     }
-                    _deferredDrops.Clear();
+                    _deferredFailures.Clear();
                 }
                 ProxyController.Instance.NotifyServersChanged();
                 return;
             }
 
-            // Drop the server once every copy of it has been tested and none passed —
-            // but a server of the group first gets a second check at the end of the cycle.
-            if (_pending[key] <= 0 && !_bestSpeed.ContainsKey(key) && _copies.ContainsKey(key))
+            // Every copy of a member has been tested and none passed: a failed check (it leaves the group
+            // only after several in a row; the scheduler re-checks it after the retry interval).
+            if (_pending[key] <= 0 && !_bestSpeed.ContainsKey(key) && _copies.ContainsKey(key) && !_cycle.IsCancellationRequested)
             {
-                if (!_retryingKeys.Contains(key))
+                if (_bestSpeed.Count == 0)
                 {
-                    _retryKeys.Add(key);
-                }
-                else if (_bestSpeed.Count == 0)
-                {
-                    _deferredDrops.Add(key);
+                    _deferredFailures.Add(key);
                 }
                 else
                 {
-                    await DropAsync(key);
-                    ProxyController.Instance.NotifyServersChanged();
+                    await FailAsync(key);
                 }
             }
         }
@@ -474,63 +541,16 @@ public sealed class AliveSession
     /// <summary>At least one server passed in this cycle (so our own network works).</summary>
     public bool AnyQualified => _bestSpeed.Count > 0;
 
-    /// <summary>
-    /// Switches the session to the second-check pass and returns one server per group member that
-    /// failed the first pass. Failing again removes it.
-    /// </summary>
-    public Task<List<ProfileItem>> BeginRetryAsync()
-    {
-        // Runs in the same serialized chain as result handling (the main job may still be delivering results).
-        var tcs = new TaskCompletionSource<List<ProfileItem>>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_gate)
-        {
-            _chain = _chain.ContinueWith(_ => tcs.SetResult(BeginRetryCore()), TaskScheduler.Default);
-        }
-        return tcs.Task;
-    }
-
-    private List<ProfileItem> BeginRetryCore()
-    {
-        var items = new List<ProfileItem>();
-        var keys = _retryKeys.Where(k => !_bestSpeed.ContainsKey(k) && !_retryingKeys.Contains(k)).ToList();
-        foreach (var key in keys)
-        {
-            var id = _sourcesOfKey[key].FirstOrDefault(i => _sources.ContainsKey(i));
-            if (id != null)
-            {
-                _retryingKeys.Add(key);
-                _pending[key] = 1;
-                items.Add(_sources[id]);
-            }
-        }
-        return items;
-    }
-
-    private async Task DropAsync(string key)
+    private async Task FailAsync(string key)
     {
         if (!_copies.TryGetValue(key, out var copy))
         {
             return;
         }
-        if (copy.IndexId == AppHost.Config.IndexId)
+        if (await AliveGroup.FailAsync(key, copy))
         {
-            // The active server: never switch here when auto switching is off; otherwise the
-            // end-of-cycle sync moves to the best server of the complete results.
-            if (S.AutoSwitch == AutoSwitchMode.Off && !_keptActiveNoticed)
-            {
-                _keptActiveNoticed = true;
-                LogBus.Notice("[alive] " + Loc.T(
-                    $"the active server {copy.Remarks} no longer qualifies — kept because auto switch is off",
-                    $"активный сервер {copy.Remarks} больше не проходит проверку — оставлен, т.к. автопереключение выключено"));
-            }
-            return;
+            _copies.Remove(key);
+            ProxyController.Instance.NotifyServersChanged();
         }
-        var fresh = await AppManager.Instance.GetProfileItem(copy.IndexId);
-        if (fresh != null)
-        {
-            await ConfigHandler.RemoveServers(AppHost.Config, [fresh]);
-        }
-        _copies.Remove(key);
-        LogBus.Write($"[alive] − {copy.Remarks}");
     }
 }

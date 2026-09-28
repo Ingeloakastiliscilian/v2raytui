@@ -14,6 +14,11 @@ public sealed class BackgroundScheduler
     private Task? _loop;
     private volatile bool _runRequested;
     private volatile bool _skipSubUpdateOnce;
+    private volatile bool _aliveFirstOnce;
+    private volatile bool _restartPending;
+    private CancellationTokenSource? _cycleCts;
+    private Task? _retryLoop;
+    private TestJob? _retryJob;
 
     public DateTime? NextRun { get; private set; }
     public DateTime? LastRun { get; private set; }
@@ -44,8 +49,11 @@ public sealed class BackgroundScheduler
         _cts = new CancellationTokenSource();
         AppHost.SubscriptionsUpdated += OnSubscriptionsUpdated;
         TestService.Instance.JobChanged += OnJobChanged;
+        NetworkMonitor.Instance.Changed += OnNetworkChanged;
+        NetworkMonitor.Instance.Start();
         Reschedule();
         _loop = Task.Run(() => LoopAsync(_cts.Token));
+        _retryLoop = Task.Run(() => RetryLoopAsync(_cts.Token));
         if (S.BackgroundEnabled)
         {
             // Starts working right away rather than after the first interval.
@@ -57,13 +65,20 @@ public sealed class BackgroundScheduler
     {
         AppHost.SubscriptionsUpdated -= OnSubscriptionsUpdated;
         TestService.Instance.JobChanged -= OnJobChanged;
+        NetworkMonitor.Instance.Changed -= OnNetworkChanged;
+        NetworkMonitor.Instance.Stop();
         _cts?.Cancel();
         CurrentJob?.Cts.Cancel();
-        if (_loop != null)
+        _retryJob?.Cts.Cancel();
+        foreach (var t in new[] { _loop, _retryLoop })
         {
+            if (t == null)
+            {
+                continue;
+            }
             try
             {
-                await _loop;
+                await t;
             }
             catch
             {
@@ -71,6 +86,7 @@ public sealed class BackgroundScheduler
             }
         }
         _loop = null;
+        _retryLoop = null;
     }
 
     /// <summary>Recomputes the next run from settings (call after settings changed).</summary>
@@ -96,6 +112,49 @@ public sealed class BackgroundScheduler
         if (!job.IsRunning && !job.Background && S.AliveEnabled)
         {
             _ = AliveGroup.AddFromTestAsync(job);
+        }
+    }
+
+    /// <summary>
+    /// Another network: its DNS for the core (if enabled), forget failures seen on the old one, and start the
+    /// cycle over — Alive members first, so the group reflects the new network as soon as possible.
+    /// </summary>
+    private void OnNetworkChanged(NetworkInfo old, NetworkInfo now)
+    {
+        LogBus.Notice("[net] " + Loc.T($"network changed: {now}", $"сеть сменилась: {now}"));
+        AliveFailures.ResetAll();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ProxyController.Instance.OnNetworkChangedAsync();
+            }
+            catch (Exception ex)
+            {
+                LogBus.Write($"[net] {ex.Message}");
+            }
+            if (S.BackgroundEnabled)
+            {
+                RestartCycle(Loc.T("network changed", "смена сети"));
+            }
+        });
+    }
+
+    /// <summary>Stops the running cycle (if any) and starts a new one, Alive members first.</summary>
+    public void RestartCycle(string reason)
+    {
+        _aliveFirstOnce = true;
+        // Test right away; subscriptions are updated by the next regular cycle.
+        _skipSubUpdateOnce = true;
+        if (IsRunning)
+        {
+            LogBus.Write("[bg] " + Loc.T($"restarting the cycle: {reason}", $"перезапуск цикла: {reason}"));
+            _restartPending = true;
+            _cycleCts?.Cancel();
+        }
+        else
+        {
+            RunNow();
         }
     }
 
@@ -141,13 +200,18 @@ public sealed class BackgroundScheduler
             {
                 break;
             }
+            catch (OperationCanceledException)
+            {
+                // the cycle was restarted
+            }
             catch (Exception ex)
             {
                 Logging.SaveLog("BackgroundScheduler", ex);
                 LogBus.Write($"[bg] {ex.Message}");
             }
-            // Requests that arrived while the cycle was running are covered by it.
-            _runRequested = false;
+            // Requests that arrived while the cycle was running are covered by it — except a restart.
+            _runRequested = _restartPending;
+            _restartPending = false;
             LastRun = DateTime.Now;
             Reschedule();
         }
@@ -160,6 +224,11 @@ public sealed class BackgroundScheduler
         {
             return;
         }
+        using var cycleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _cycleCts = cycleCts;
+        ct = cycleCts.Token;
+        var aliveFirst = _aliveFirstOnce;
+        _aliveFirstOnce = false;
         try
         {
             Changed?.Invoke();
@@ -212,7 +281,7 @@ public sealed class BackgroundScheduler
                     .GroupBy(AliveGroup.Key)
                     .Select(g => g.FirstOrDefault(p => p.IndexId == activeId) ?? g.First())
                     .ToList();
-                session = await AliveSession.StartAsync(items, toTest);
+                session = await AliveSession.StartAsync(items, toTest, ct);
                 if (toTest.Count < items.Count)
                 {
                     LogBus.Write("[bg] " + Loc.T($"{items.Count} servers, {toTest.Count} distinct", $"серверов {items.Count}, различных {toTest.Count}"));
@@ -220,49 +289,70 @@ public sealed class BackgroundScheduler
                 items = toTest;
             }
             SetStage(Loc.T("testing", "проверка серверов"));
-            CurrentJob = aliveOn
-                ? TestService.Instance.Start(title, TestMode.PingThenSpeed, items, background: true, speedTopN: 0,
+            TestJob Start(string t, IReadOnlyList<ProfileItem> list) => aliveOn
+                ? TestService.Instance.Start(t, TestMode.PingThenSpeed, list, background: true, speedTopN: 0,
                     onItemFinished: session!.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds)
-                : TestService.Instance.Start(title, S.BackgroundMode, items, background: true, speedSeconds: S.BackgroundSpeedTestSeconds);
+                : TestService.Instance.Start(t, S.BackgroundMode, list, background: true, speedSeconds: S.BackgroundSpeedTestSeconds);
+
+            // After a network change the members of the group go first (their own job), then everything else.
+            var first = items;
+            var rest = new List<ProfileItem>();
+            if (aliveFirst && session != null)
+            {
+                var members = session.MemberKeys;
+                first = items.Where(p => members.Contains(AliveGroup.Key(p))).ToList();
+                rest = items.Where(p => !first.Contains(p)).ToList();
+                if (first.Count == 0)
+                {
+                    (first, rest) = (rest, []);
+                }
+                else
+                {
+                    LogBus.Write("[bg] " + Loc.T($"{S.AliveName} members first: {first.Count}", $"сначала участники {S.AliveName}: {first.Count}"));
+                }
+            }
+
+            CurrentJob = Start(rest.Count > 0 ? $"{title}: {S.AliveName}" : title, first);
             Changed?.Invoke();
             var firstJob = CurrentJob;
-            // Group members dead at the ping phase are re-checked right away (not after the long speed phase),
-            // so dead servers leave the group within seconds of the cycle start.
-            var quickRetry = session != null
-                ? Task.Run(async () =>
-                {
-                    await Task.WhenAny(firstJob.PingPhaseDone.Task, firstJob.Completion);
-                    if (!firstJob.Cancelled)
-                    {
-                        await RecheckAsync(firstJob, session, title, Loc.T("re-checking {0} not answering", "перепроверка {0} не ответивших"), ct);
-                    }
-                }, ct)
-                : Task.CompletedTask;
             using (ct.Register(() => CurrentJob?.Cts.Cancel()))
             {
                 await firstJob.Completion;
+                if (rest.Count > 0 && !firstJob.Cancelled)
+                {
+                    CurrentJob = Start(title, rest);
+                    Changed?.Invoke();
+                    await CurrentJob.Completion;
+                    // One result set for the reconciliation and auto switching.
+                    foreach (var p in rest)
+                    {
+                        if (CurrentJob.Delays.TryGetValue(p.IndexId, out var d))
+                        {
+                            firstJob.Delays[p.IndexId] = d;
+                        }
+                        if (CurrentJob.Speeds.TryGetValue(p.IndexId, out var sp))
+                        {
+                            firstJob.Speeds[p.IndexId] = sp;
+                        }
+                        if (CurrentJob.IpInfos.TryGetValue(p.IndexId, out var ip))
+                        {
+                            firstJob.IpInfos[p.IndexId] = ip;
+                        }
+                    }
+                    if (CurrentJob.Cancelled)
+                    {
+                        firstJob.Cts.Cancel();
+                    }
+                }
             }
-            try
-            {
-                await quickRetry;
-            }
-            catch (OperationCanceledException)
-            {
-                // cancelled with the cycle
-            }
-            CurrentJob = firstJob;
+            ct.ThrowIfCancellationRequested();
             if (session != null)
             {
                 await session.DrainAsync();
-                // Second check for group members that failed the speed threshold once (a single bad measurement
-                // must not throw a working server out); only when the network worked in this cycle.
-                if (!firstJob.Cancelled && session.AnyQualified)
-                {
-                    SetStage(Loc.T("re-check", "перепроверка"));
-                    await RecheckAsync(firstJob, session, title, Loc.T("re-checking {0} that failed once", "перепроверка {0} не прошедших с первого раза"), ct);
-                }
             }
-            LastResult = CurrentJob.ProgressText;
+            var summary = CurrentJob.ProgressText;
+            CurrentJob = firstJob;
+            LastResult = summary;
 
             if (!CurrentJob.Cancelled)
             {
@@ -277,6 +367,7 @@ public sealed class BackgroundScheduler
         }
         finally
         {
+            _cycleCts = null;
             Stage = "";
             _runGate.Release();
             Changed?.Invoke();
@@ -284,36 +375,105 @@ public sealed class BackgroundScheduler
     }
 
     /// <summary>
-    /// Re-tests group members that failed (dropping those that fail again) and merges the new results into
-    /// <paramref name="first"/>, which the final reconciliation reads.
+    /// Re-checks Alive members that failed, each after the retry interval (≥ 1 min) — between and during
+    /// cycles, with its own speed slot. A member that passes is forgiven; one that fails again moves towards
+    /// removal (<see cref="TuiSettings.AliveDropAfterFailures"/>). A healthy member is tested along as a
+    /// control: when it fails too, our own network is the problem and nothing is counted.
     /// </summary>
-    private async Task RecheckAsync(TestJob first, AliveSession session, string title, string message, CancellationToken ct)
+    private async Task RetryLoopAsync(CancellationToken ct)
     {
-        var retry = await session.BeginRetryAsync();
-        if (retry.Count == 0)
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                if (S.AliveEnabled && AliveGroup.CurrentId is { } groupId && AliveFailures.DueKeys() is { Count: > 0 } due)
+                {
+                    await RecheckFailedAsync(groupId, due.ToHashSet(), ct);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Logging.SaveLog("BackgroundScheduler.Retry", ex);
+                LogBus.Write($"[alive] {ex.Message}");
+            }
+        }
+    }
+
+    private async Task RecheckFailedAsync(string groupId, HashSet<string> due, CancellationToken ct)
+    {
+        if (!CoreUpdater.MainCores.Any(CoreUpdater.IsInstalled) || !NetworkMonitor.Instance.Current.IsUp && OperatingSystem.IsLinux())
         {
             return;
         }
-        LogBus.Write("[alive] " + string.Format(message, retry.Count));
-        var second = TestService.Instance.Start(title + Loc.T(": re-check", ": перепроверка"), TestMode.PingThenSpeed, retry, background: true,
-            speedTopN: 0, onItemFinished: session.OnItemFinished, speedSeconds: S.BackgroundSpeedTestSeconds);
-        using (ct.Register(() => second.Cts.Cancel()))
+        var copies = await AppManager.Instance.ProfileItems(groupId) ?? [];
+        var byKey = copies.GroupBy(AliveGroup.Key).ToDictionary(g => g.Key, g => g.First());
+        var targets = due.Where(byKey.ContainsKey).Select(k => (Key: k, Copy: byKey[k])).ToList();
+        // Members no longer in the group need no re-check.
+        AliveFailures.Retain(byKey.Keys.ToHashSet());
+        if (targets.Count == 0)
         {
-            await second.Completion;
+            return;
         }
-        await session.DrainAsync();
-        foreach (var p in retry)
+        var exs = (await ProfileExManager.Instance.GetProfileExs()).GroupBy(e => e.IndexId).ToDictionary(g => g.Key, g => g.First());
+        var control = byKey
+            .Where(kv => AliveFailures.Count(kv.Key) == 0)
+            .Select(kv => kv.Value)
+            .OrderByDescending(c => exs.GetValueOrDefault(c.IndexId)?.Speed ?? 0)
+            .FirstOrDefault();
+
+        var items = targets.Select(t => t.Copy).ToList();
+        if (control != null)
         {
-            first.Delays[p.IndexId] = second.Delays.GetValueOrDefault(p.IndexId, -1);
-            first.Speeds[p.IndexId] = second.Speeds.GetValueOrDefault(p.IndexId, 0);
-            if (second.IpInfos.TryGetValue(p.IndexId, out var ip))
+            items.Add(control);
+        }
+        LogBus.Write("[alive] " + Loc.T($"re-checking {targets.Count} failed", $"повторная проверка не прошедших: {targets.Count}"));
+        var job = TestService.Instance.Start($"{S.AliveName}: " + Loc.T("re-check", "повтор"), TestMode.PingThenSpeed, items, background: true,
+            speedTopN: 0, speedSeconds: S.BackgroundSpeedTestSeconds, ownSpeedLimiter: true);
+        _retryJob = job;
+        using (ct.Register(() => job.Cts.Cancel()))
+        {
+            await job.Completion;
+        }
+        _retryJob = null;
+        if (job.Cancelled)
+        {
+            return;
+        }
+
+        bool Passed(ProfileItem p) => AliveGroup.Qualifies(job.Delays.GetValueOrDefault(p.IndexId), job.Speeds.GetValueOrDefault(p.IndexId));
+        var networkOk = control == null ? targets.Any(t => Passed(t.Copy)) || NetworkMonitor.Instance.Current.IsUp : Passed(control);
+        var changed = false;
+        foreach (var (key, copy) in targets)
+        {
+            if (Passed(copy))
             {
-                first.IpInfos[p.IndexId] = ip;
+                AliveFailures.Clear(key);
+                LogBus.Write("[alive] " + Loc.T($"✓ {copy.Remarks} passes again", $"✓ {copy.Remarks} снова проходит"));
+                changed = true;
+            }
+            else if (!networkOk)
+            {
+                AliveFailures.Postpone(key);
+            }
+            else
+            {
+                changed |= await AliveGroup.FailAsync(key, copy);
             }
         }
-        if (second.Cancelled)
+        if (!networkOk)
         {
-            first.Cts.Cancel();
+            LogBus.Write("[alive] " + Loc.T("the control server failed too — not counted (network?)", "контрольный сервер тоже не прошёл — не засчитано (сеть?)"));
+        }
+        await AliveGroup.ResortAsync();
+        await ProfileExManager.Instance.SaveTo();
+        if (changed)
+        {
+            ProxyController.Instance.NotifyServersChanged();
         }
     }
 

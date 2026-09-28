@@ -124,6 +124,24 @@ public sealed class TuiSettings
     /// <summary>Maximal real delay, ms (0 = no limit).</summary>
     public int AliveMaxDelay { get; set; }
 
+    /// <summary>
+    /// A member leaves the group only after failing this many checks in a row (dead or below the thresholds);
+    /// a single bad measurement or a short outage does not throw a working server out.
+    /// </summary>
+    public int AliveDropAfterFailures { get; set; } = 3;
+
+    /// <summary>A failed member is checked again after this many minutes (at least 1).</summary>
+    public int AliveRetryMinutes { get; set; } = 1;
+
+    // --- DNS ---
+
+    /// <summary>
+    /// Use the DNS servers of the current network (DHCP) as the direct DNS, and send its search domains
+    /// (e.g. corp.local) direct. Applied when the core config is built and again when the network changes;
+    /// the DNS settings themselves are not modified (they apply when no network DNS is found).
+    /// </summary>
+    public bool DnsFromNetwork { get; set; }
+
     // --- misc ---
 
     /// <summary>Show core process output in the log (noisy during mass tests).</summary>
@@ -185,5 +203,7 @@ public sealed class TuiSettings
         AliveSubId ??= "";
         AliveMinSpeed = Math.Max(0, AliveMinSpeed);
         AliveMaxDelay = Math.Max(0, AliveMaxDelay);
+        AliveDropAfterFailures = Math.Clamp(AliveDropAfterFailures, 1, 100);
+        AliveRetryMinutes = Math.Clamp(AliveRetryMinutes, 1, 24 * 60);
     }
 }

@@ -358,7 +358,6 @@ internal static class SettingsDialogs
         var bgOn = f.Check(L("Enabled", "Включён"), s.BackgroundEnabled);
         var interval = f.Number(L("Interval after a cycle ends, min", "Пауза между циклами, мин"), s.BackgroundIntervalMinutes);
         var scope = f.Picker(L("Test servers of", "Тестировать серверы"), scopeNames, ScopeIndex(s.BackgroundSubId));
-        TextField? topSpeeds = null;
         OptionSelector<TestMode>? mode = null;
         CheckBox? upd = null;
         if (aliveOn)
@@ -479,14 +478,18 @@ internal static class SettingsDialogs
         var name = f.Text(L("Group name", "Название группы"), s.AliveName);
         var minSpeed = f.Text(L("Min speed, MB/s", "Мин. скорость, МБ/с"), s.AliveMinSpeed.ToString(System.Globalization.CultureInfo.InvariantCulture));
         var maxDelay = f.Number(L("Max delay, ms (0 = any)", "Макс. задержка, мс (0 = любая)"), s.AliveMaxDelay);
+        var dropAfter = f.Number(L("Remove after failures in a row", "Удалять после провалов подряд"), s.AliveDropAfterFailures);
+        var retryMin = f.Number(L("Re-check after, min (≥ 1)", "Повтор через, мин (≥ 1)"), s.AliveRetryMinutes);
         f.Note(L(
             "Each background cycle: update subscriptions (if due) → ping every server → measure the speed\n" +
-            "of every server that answered → rebuild the group (add new, drop dead/slow, keep the rest).\n" +
-            "Subscription updates never touch the group.\n" +
+            "of every server that answered → rebuild the group. A member that fails (dead or below the thresholds)\n" +
+            "is re-checked after the interval and removed only after that many failures in a row; a pass resets it.\n" +
+            "Subscription updates never touch the group. A network change starts a new cycle, members first.\n" +
             "Cycle interval, speed test settings, subscription rate limit and auto switch: F2 → Background.",
             "Каждый фоновый цикл: обновить подписки (если пора) → пинг всех серверов → скорость всех\n" +
-            "ответивших → пересобрать группу (новые добавить, мёртвые/медленные убрать, остальные не трогать).\n" +
-            "Обновление подписок группу не затрагивает.\n" +
+            "ответивших → пересобрать группу. Не прошедший участник (мёртв или ниже порогов) перепроверяется\n" +
+            "через интервал и удаляется только после стольких провалов подряд; успешная проверка их обнуляет.\n" +
+            "Обновление подписок группу не затрагивает. Смена сети запускает новый цикл — сначала участники группы.\n" +
             "Интервал циклов, замер скорости, частота обновления подписок и автопереключение: F2 → Фоновый режим."));
 
         static decimal? ParseSpeed(string text) =>
@@ -501,6 +504,8 @@ internal static class SettingsDialogs
         s.AliveName = name.Text.Trim();
         s.AliveMinSpeed = ParseSpeed(minSpeed.Text) ?? s.AliveMinSpeed;
         s.AliveMaxDelay = Form.Int(maxDelay, s.AliveMaxDelay);
+        s.AliveDropAfterFailures = Form.Int(dropAfter, s.AliveDropAfterFailures);
+        s.AliveRetryMinutes = Form.Int(retryMin, s.AliveRetryMinutes);
         if (s.AliveEnabled)
         {
             // The group is maintained by the background cycles.
@@ -536,6 +541,13 @@ internal static class SettingsDialogs
             f.Note(L($"⚠ A custom DNS config is on for {which}: the settings below do not apply to it.",
                      $"⚠ Для {which} включён пользовательский DNS-конфиг: настройки ниже к нему не применяются."));
         }
+        var net = NetworkMonitor.Read();
+        var fromNet = f.Check(L("DNS of the current network (DHCP) for direct traffic and its local domains",
+            "DNS текущей сети (DHCP) для прямых подключений и её локальных доменов"), AppHost.Settings.DnsFromNetwork);
+        f.Note(L($"  Now: {(net.DnsServers.Count > 0 ? net.ToString() : "no DNS from the network")}. Updated when the network changes;",
+                 $"  Сейчас: {(net.DnsServers.Count > 0 ? net.ToString() : "сеть не сообщила DNS")}. Меняется вместе с сетью;"));
+        f.Note(L("  the direct and bootstrap DNS below then apply only when the network gives none.",
+                 "  прямой и bootstrap DNS ниже тогда действуют, только если сеть DNS не сообщила."));
         f.Section(L("Servers", "Серверы"));
         var direct = f.Combo(L("Direct DNS", "DNS для прямых подключений"), d.DirectDNS, Distinct(DirectDnsPresets));
         var remote = f.Combo(L("Remote DNS (via proxy)", "Удалённый DNS (через прокси)"), d.RemoteDNS, Distinct(RemoteDnsPresets));
@@ -588,6 +600,8 @@ internal static class SettingsDialogs
         {
             return false;
         }
+        AppHost.Settings.DnsFromNetwork = Form.Bool(fromNet);
+        AppHost.SaveSettings();
         d.DirectDNS = direct.Text.Trim();
         d.RemoteDNS = remote.Text.Trim();
         d.BootstrapDNS = boot.Text.Trim();

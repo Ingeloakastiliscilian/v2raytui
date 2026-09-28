@@ -337,8 +337,13 @@ v2rayn-tui — терминальный интерфейс к движку v2ray
             Console.WriteLine($"{core}: {(CoreUpdater.IsInstalled(core) ? L("installed", "установлено") : L("missing (run `core update`)", "нет (выполните `core update`)"))}");
         }
         var st = TuiSettings.Load();
+        var net = NetworkMonitor.Read();
+        Console.WriteLine(L($"Network: {net}", $"Сеть: {net}"));
+        Console.WriteLine(L($"DNS from the network: {(st.DnsFromNetwork ? "on" : "off")}", $"DNS из сети: {(st.DnsFromNetwork ? "вкл" : "выкл")}"));
         Console.WriteLine(st.AliveEnabled
-            ? $"{st.AliveName}: {L("on", "вкл")}, ≥ {st.AliveMinSpeed} MB/s{(st.AliveMaxDelay > 0 ? $", ≤ {st.AliveMaxDelay} ms" : "")}, {L("every", "каждые")} {st.BackgroundIntervalMinutes} min"
+            ? $"{st.AliveName}: {L("on", "вкл")}, ≥ {st.AliveMinSpeed} MB/s{(st.AliveMaxDelay > 0 ? $", ≤ {st.AliveMaxDelay} ms" : "")}, {L("every", "каждые")} {st.BackgroundIntervalMinutes} min, "
+              + L($"removed after {st.AliveDropAfterFailures} failures ({st.AliveRetryMinutes} min apart), failing now: {AliveFailures.Failing}",
+                  $"удаление после {st.AliveDropAfterFailures} провалов (через {st.AliveRetryMinutes} мин), сейчас не проходят: {AliveFailures.Failing}")
             : $"Alive: {L("off", "выкл")}");
         Console.WriteLine($"geo: {(CoreUpdater.GeoFilesPresent ? L("installed", "установлено") : L("missing (run `geo update`)", "нет (выполните `geo update`)"))}");
         return 0;

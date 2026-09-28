@@ -74,7 +74,9 @@ public sealed class ProxyController
             {
                 buildConfig.TunModeItem.EnableLegacyProtect = true;
             }
+            var net = ApplyNetworkDns(buildConfig);
             var all = await CoreConfigContextBuilder.BuildAll(buildConfig, profile);
+            all = WithLocalDomainsDirect(all, net);
             _tunInterface = all.PreSocksResult?.Context.IsTunEnabled == true || all.MainResult.Context.RunCoreType == ECoreType.sing_box
                 ? "singbox_tun"
                 : "xray_tun";
@@ -737,4 +739,81 @@ public sealed class ProxyController
     #endregion subscriptions
 
     public void NotifyServersChanged() => ServersChanged?.Invoke();
+
+    #region DNS of the current network
+
+    /// <summary>What "DNS from the network" put into the running config (for the UI), or "".</summary>
+    public string NetworkDnsText { get; private set; } = "";
+
+    private string _loggedNetworkDns = "";
+
+    /// <summary>
+    /// "DNS from the network": its servers become the direct and bootstrap DNS of this build (a copy of the
+    /// config — the saved DNS settings stay and apply again when no network DNS is found).
+    /// </summary>
+    private NetworkInfo? ApplyNetworkDns(Config buildConfig)
+    {
+        NetworkDnsText = "";
+        if (!AppHost.Settings.DnsFromNetwork)
+        {
+            return null;
+        }
+        var net = NetworkMonitor.Instance.Current.IsUp ? NetworkMonitor.Instance.Current : NetworkMonitor.Read();
+        if (net.DnsServers.Count == 0)
+        {
+            LogBus.Write("[dns] " + Loc.T("no DNS servers from the network — using the DNS settings",
+                "сеть не сообщила DNS-серверов — используются настройки DNS"));
+            return null;
+        }
+        var servers = string.Join(",", net.DnsServers);
+        buildConfig.SimpleDNSItem.DirectDNS = servers;
+        // Bootstrap only resolves DoH/DoT server names; a plain IP of the network is the safe choice there
+        // (a corporate firewall may drop public resolvers).
+        buildConfig.SimpleDNSItem.BootstrapDNS = servers;
+        NetworkDnsText = servers + (net.SearchDomains.Count > 0 ? " · " + string.Join(", ", net.SearchDomains) : "");
+        if (_loggedNetworkDns != NetworkDnsText)
+        {
+            _loggedNetworkDns = NetworkDnsText;
+            LogBus.Write("[dns] " + Loc.T($"from the network: {NetworkDnsText}", $"из сети: {NetworkDnsText}"));
+        }
+        return net;
+    }
+
+    /// <summary>
+    /// The search domains of the network (corp.local…) go direct and are resolved by its DNS, whatever the
+    /// routing rule set says: a rule is put in front of the rules of this build (the saved set is not changed).
+    /// </summary>
+    private static CoreConfigContextBuilderAllResult WithLocalDomainsDirect(CoreConfigContextBuilderAllResult all, NetworkInfo? net)
+    {
+        if (net is not { SearchDomains.Count: > 0 } || all.MainResult.Context.RoutingItem is not { } routing)
+        {
+            return all;
+        }
+        var rules = JsonUtils.Deserialize<List<RulesItem>>(routing.RuleSet) ?? [];
+        rules.Insert(0, new RulesItem
+        {
+            Id = Utils.GetGuid(false),
+            OutboundTag = Global.DirectTag,
+            Domain = net.SearchDomains.Select(d => "domain:" + d).ToList(),
+            Enabled = true,
+            Remarks = "v2rayn-tui: network search domains",
+        });
+        var copy = JsonUtils.DeepCopy(routing)!;
+        copy.RuleSet = JsonUtils.Serialize(rules, false);
+        var main = all.MainResult with { Context = all.MainResult.Context with { RoutingItem = copy } };
+        var pre = all.PreSocksResult is { } p ? p with { Context = p.Context with { RoutingItem = copy } } : null;
+        return new CoreConfigContextBuilderAllResult(main, pre);
+    }
+
+    /// <summary>The network changed: with "DNS from the network" the core is rebuilt with its DNS.</summary>
+    public async Task OnNetworkChangedAsync()
+    {
+        if (AppHost.Settings.DnsFromNetwork && CoreRunning)
+        {
+            LogBus.Write("[dns] " + Loc.T("network changed — restarting the core with its DNS", "сеть сменилась — перезапуск ядра с её DNS"));
+            await ReloadAsync();
+        }
+    }
+
+    #endregion
 }
