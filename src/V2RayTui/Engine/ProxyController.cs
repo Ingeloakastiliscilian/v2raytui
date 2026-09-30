@@ -991,6 +991,24 @@ public sealed class ProxyController
         return new CoreConfigContextBuilderAllResult(main, pre);
     }
 
+    /// <summary>
+    /// The same network is back after a short loss. The core keeps running (sing-box TUN follows the interface
+    /// by itself); it is rebuilt only if it was started while the network was gone, i.e. without its DNS.
+    /// </summary>
+    public async Task EnsureNetworkDnsAsync(NetworkInfo net)
+    {
+        if (!AppHost.Settings.DnsFromNetwork || !CoreRunning || net.DnsServers.Count == 0)
+        {
+            return;
+        }
+        var expected = string.Join(",", net.DnsServers) + (net.SearchDomains.Count > 0 ? " · " + string.Join(", ", net.SearchDomains) : "");
+        if (NetworkDnsText != expected)
+        {
+            LogBus.Write("[dns] " + Loc.T("the core was started without the network's DNS — restarting", "ядро запускалось без DNS сети — перезапуск"));
+            await ReloadAsync();
+        }
+    }
+
     /// <summary>The network changed: with "DNS from the network" the core is rebuilt with its DNS.</summary>
     public async Task OnNetworkChangedAsync()
     {

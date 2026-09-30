@@ -26,14 +26,25 @@ public sealed class NetworkMonitor
 
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
 
+    // A new network must look the same for this long before it counts (DHCP / VPN clients change the DNS list
+    // in steps; one Wi-Fi seen 29.09 flipped its DNS every 10 s).
+    private static readonly TimeSpan SettleTime = TimeSpan.FromSeconds(20);
+
     private CancellationTokenSource? _cts;
     private string _candidate = "";
-    private int _stableCount;
+    private DateTime _candidateSince;
+    private NetworkInfo _lastUp = NetworkInfo.None;
 
     public NetworkInfo Current { get; private set; } = NetworkInfo.None;
 
     /// <summary>Raised (on a worker thread) with (old, new) when we are on another network and it has settled.</summary>
     public event Action<NetworkInfo, NetworkInfo>? Changed;
+
+    /// <summary>
+    /// The same network is back after a short loss (Wi-Fi reconnect, resume): nothing to rebuild, except what
+    /// was built while it was gone.
+    /// </summary>
+    public event Action<NetworkInfo>? Restored;
 
     public void Start()
     {
@@ -43,6 +54,7 @@ public sealed class NetworkMonitor
         }
         _cts = new CancellationTokenSource();
         Current = Read();
+        _lastUp = Current;
         LogBus.WriteFileOnly($"[net] {Current}");
         var ct = _cts.Token;
         _ = Task.Run(async () =>
@@ -78,29 +90,45 @@ public sealed class NetworkMonitor
         if (now.Fingerprint == Current.Fingerprint)
         {
             _candidate = "";
-            _stableCount = 0;
             return;
         }
-        // DHCP brings the route and DNS in steps: wait until two polls agree.
+        if (!now.IsUp)
+        {
+            // Lost: remember it, act only on what comes back.
+            _candidate = "";
+            if (Current.IsUp)
+            {
+                Current = now;
+                LogBus.Write("[net] " + Loc.T("network: none", "сеть: нет сети"));
+            }
+            return;
+        }
         if (now.Fingerprint != _candidate)
         {
             _candidate = now.Fingerprint;
-            _stableCount = 1;
-            return;
+            _candidateSince = DateTime.UtcNow;
+            // The network we had before a short loss: no need to wait for it to settle.
+            if (now.Fingerprint != _lastUp.Fingerprint)
+            {
+                return;
+            }
         }
-        if (++_stableCount < 2)
+        else if (DateTime.UtcNow - _candidateSince < SettleTime && now.Fingerprint != _lastUp.Fingerprint)
         {
             return;
         }
-        var old = Current;
+        var old = _lastUp;
         Current = now;
+        _lastUp = now;
         _candidate = "";
-        _stableCount = 0;
-        LogBus.Write("[net] " + Loc.T($"network: {now}", $"сеть: {now}"));
-        if (now.IsUp)
+        if (now.Fingerprint == old.Fingerprint)
         {
-            Changed?.Invoke(old, now);
+            LogBus.Write("[net] " + Loc.T($"network is back: {now}", $"сеть вернулась: {now}"));
+            Restored?.Invoke(now);
+            return;
         }
+        LogBus.Write("[net] " + Loc.T($"network: {now}", $"сеть: {now}"));
+        Changed?.Invoke(old, now);
     }
 
     // Our TUN, VPN-less virtual links: never "the network".

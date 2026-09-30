@@ -50,6 +50,7 @@ public sealed class BackgroundScheduler
         AppHost.SubscriptionsUpdated += OnSubscriptionsUpdated;
         TestService.Instance.JobChanged += OnJobChanged;
         NetworkMonitor.Instance.Changed += OnNetworkChanged;
+        NetworkMonitor.Instance.Restored += OnNetworkRestored;
         NetworkMonitor.Instance.Start();
         Reschedule();
         _loop = Task.Run(() => LoopAsync(_cts.Token));
@@ -66,6 +67,7 @@ public sealed class BackgroundScheduler
         AppHost.SubscriptionsUpdated -= OnSubscriptionsUpdated;
         TestService.Instance.JobChanged -= OnJobChanged;
         NetworkMonitor.Instance.Changed -= OnNetworkChanged;
+        NetworkMonitor.Instance.Restored -= OnNetworkRestored;
         NetworkMonitor.Instance.Stop();
         _cts?.Cancel();
         CurrentJob?.Cts.Cancel();
@@ -140,6 +142,19 @@ public sealed class BackgroundScheduler
             }
         });
     }
+
+    private static void OnNetworkRestored(NetworkInfo now) =>
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ProxyController.Instance.EnsureNetworkDnsAsync(now);
+            }
+            catch (Exception ex)
+            {
+                LogBus.Write($"[net] {ex.Message}");
+            }
+        });
 
     /// <summary>Stops the running cycle (if any) and starts a new one, Alive members first.</summary>
     public void RestartCycle(string reason)
