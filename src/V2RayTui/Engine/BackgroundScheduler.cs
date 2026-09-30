@@ -78,7 +78,8 @@ public sealed class BackgroundScheduler
             }
             try
             {
-                await t;
+                // A subscription download cannot be cancelled: do not hold the exit for it.
+                await t.WaitAsync(TimeSpan.FromSeconds(5));
             }
             catch
             {

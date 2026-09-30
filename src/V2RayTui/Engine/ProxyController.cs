@@ -47,12 +47,179 @@ public sealed class ProxyController
         if (AppHost.Settings.TunViaSingBox)
         {
             buildConfig.TunModeItem.EnableLegacyProtect = true;
+            // The TUN core gets its own inbound of xray (local port + 1, "socks2"), see WithTunInboundTrusted.
+            buildConfig.Inbound.First().SecondLocalPortEnabled |= tun;
         }
         // Read fresh on every build — turning TUN on included: in TUN mode every DNS query of the system
         // goes to the core, so it must have the DNS of the network we are on right now.
         var net = ApplyNetworkDns(buildConfig, tun);
         var all = await CoreConfigContextBuilder.BuildAll(buildConfig, profile);
-        return WithLocalDomainsDirect(all, net);
+        all = WithLocalDomainsDirect(all, net);
+        return WithTunInboundTrusted(all);
+    }
+
+    /// <summary>
+    /// TUN via sing-box runs two cores: sing-box routes the system traffic (it sees which application a
+    /// connection belongs to) and hands what goes through the proxy to xray. xray used to route it again with
+    /// the same rules — but it cannot see the application (to xray every such connection comes from sing-box),
+    /// so per-application rules fell through to the last rule ("the rest direct"). Now sing-box connects to
+    /// a separate inbound of xray, and everything arriving there goes to the proxy: routed once, by sing-box.
+    /// It also keeps TUN traffic off the main local port, which another program may share (SO_REUSEPORT).
+    /// </summary>
+    private static CoreConfigContextBuilderAllResult WithTunInboundTrusted(CoreConfigContextBuilderAllResult all)
+    {
+        if (all.PreSocksResult is not { } pre || pre.Context.Node.ConfigType != EConfigType.SOCKS
+            || all.MainResult.Context.RunCoreType != ECoreType.Xray || all.MainResult.Context.RoutingItem is not { } routing)
+        {
+            return all;
+        }
+        var node = JsonUtils.DeepCopy(pre.Context.Node)!;
+        node.Port = AppManager.Instance.GetLocalPort(EInboundProtocol.socks2);
+        var rules = JsonUtils.Deserialize<List<RulesItem>>(routing.RuleSet) ?? [];
+        rules.Insert(0, new RulesItem
+        {
+            Id = Utils.GetGuid(false),
+            InboundTag = [nameof(EInboundProtocol.socks2)],
+            OutboundTag = Global.ProxyTag,
+            Enabled = true,
+            RuleType = ERuleType.Routing,
+            Remarks = "v2rayn-tui: traffic from the TUN core is already routed",
+        });
+        var copy = JsonUtils.DeepCopy(routing)!;
+        copy.RuleSet = JsonUtils.Serialize(rules, false);
+        return new CoreConfigContextBuilderAllResult(
+            all.MainResult with { Context = all.MainResult.Context with { RoutingItem = copy } },
+            pre with { Context = pre.Context with { Node = node } });
+    }
+
+    /// <summary>
+    /// Listening sockets on <paramref name="ports"/> that belong to other programs (not to our own cores).
+    /// Two cores on one port do not conflict visibly: xray sets SO_REUSEPORT and the kernel then splits the
+    /// connections between them — part of the traffic silently goes through the other program's server/rules.
+    /// </summary>
+    public static List<(int Port, int Pid, string Program)> ForeignListeners(IReadOnlyCollection<int> ports)
+    {
+        var result = new List<(int, int, string)>();
+        if (!OperatingSystem.IsLinux())
+        {
+            return result;
+        }
+        try
+        {
+            var inodes = new Dictionary<string, int>();
+            foreach (var file in new[] { "/proc/net/tcp", "/proc/net/tcp6" })
+            {
+                if (!File.Exists(file))
+                {
+                    continue;
+                }
+                foreach (var line in File.ReadLines(file).Skip(1))
+                {
+                    var f = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (f.Length < 10 || f[3] != "0A")
+                    {
+                        continue;
+                    }
+                    var port = Convert.ToInt32(f[1][(f[1].LastIndexOf(':') + 1)..], 16);
+                    if (ports.Contains(port))
+                    {
+                        inodes[f[9]] = port;
+                    }
+                }
+            }
+            if (inodes.Count == 0)
+            {
+                return result;
+            }
+            var binDir = Path.GetFullPath(Utils.GetBinPath("")).TrimEnd('/') + "/";
+            foreach (var dir in Directory.EnumerateDirectories("/proc"))
+            {
+                if (!int.TryParse(Path.GetFileName(dir), out var pid) || pid == Environment.ProcessId)
+                {
+                    continue;
+                }
+                string[] fds;
+                try
+                {
+                    fds = Directory.GetFiles(Path.Combine(dir, "fd"));
+                }
+                catch
+                {
+                    continue; // another user's process
+                }
+                foreach (var fd in fds)
+                {
+                    string? target;
+                    try
+                    {
+                        target = new FileInfo(fd).LinkTarget;
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    if (target is not { } t || !t.StartsWith("socket:[") || !inodes.TryGetValue(t[8..^1], out var port))
+                    {
+                        continue;
+                    }
+                    var args = Array.Empty<string>();
+                    try
+                    {
+                        args = File.ReadAllText(Path.Combine(dir, "cmdline")).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+                    }
+                    catch
+                    {
+                        // gone
+                    }
+                    if (!args.Any(a => a.StartsWith(binDir, StringComparison.Ordinal)))
+                    {
+                        // The executable path tells whose it is (e.g. ~/.local/share/v2rayN/bin/xray/xray = v2rayN GUI).
+                        var program = args.Length > 0 ? args[0] : "?";
+                        result.Add((port, pid, program.Length > 90 ? "…" + program[^89..] : program));
+                    }
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            // best effort
+        }
+        return result;
+    }
+
+    private static int[] OwnPorts()
+    {
+        var p = AppManager.Instance.GetLocalPort(EInboundProtocol.socks);
+        return [p, p + (int)EInboundProtocol.socks2];
+    }
+
+    /// <summary>
+    /// Another program listens on our local ports (typically v2rayN GUI started at login with the same default
+    /// port): move to a free base port — the TUI has its own data directory, so the GUI is not affected.
+    /// </summary>
+    private async Task<bool> MoveOffSharedPortAsync()
+    {
+        var foreign = ForeignListeners(OwnPorts());
+        if (foreign.Count == 0)
+        {
+            return false;
+        }
+        var (port, pid, program) = foreign[0];
+        var free = SuggestFreeBasePort();
+        if (free == null)
+        {
+            LogBus.Notice(Loc.T($"Port {port} is shared with {program} (pid {pid}) and no free port was found: close it or change the port (F2 → Local proxy)",
+                $"Порт {port} делится с {program} (pid {pid}), свободный порт не найден: закройте программу или смените порт (F2 → Локальный прокси)"));
+            return false;
+        }
+        LogBus.Notice(Loc.T(
+            $"Port {port} is also listened by {program} (pid {pid}) — connections would be split between the two. Local port moved to {free}.",
+            $"Порт {port} слушает также {program} (pid {pid}) — соединения делились бы между ними. Локальный порт перенесён на {free}."));
+        Config.Inbound.First().LocalPort = free.Value;
+        AppManager.Instance.Reset();
+        await ConfigHandler.SaveConfig(Config);
+        return true;
     }
 
     public async Task ReloadAsync()
@@ -87,6 +254,7 @@ public sealed class ProxyController
                     : Loc.T("TUN is on but no sudo access in this session — starting without TUN",
                         "TUN включён, но в этом сеансе нет доступа sudo — запуск без TUN"));
             }
+            await MoveOffSharedPortAsync();
             var all = await BuildAsync(profile, tunWanted && !tunSuppressed);
             _tunInterface = all.PreSocksResult?.Context.IsTunEnabled == true || all.MainResult.Context.RunCoreType == ECoreType.sing_box
                 ? "singbox_tun"
@@ -291,6 +459,12 @@ public sealed class ProxyController
                 catch (OperationCanceledException)
                 {
                     break;
+                }
+                // A program that started after us (v2rayN GUI…) now listens on our port too: move away.
+                if (CoreRunning && !_userStopped && _reloadGate.CurrentCount > 0 && ForeignListeners(OwnPorts()).Count > 0)
+                {
+                    await ReloadAsync();
+                    continue;
                 }
                 if (!CoreRunning || _userStopped || _reloadGate.CurrentCount == 0 || MainCoreAlive() != false)
                 {
