@@ -48,8 +48,6 @@ public sealed class ProxyController
         if (AppHost.Settings.TunViaSingBox)
         {
             buildConfig.TunModeItem.EnableLegacyProtect = true;
-            // The TUN core gets its own inbound of xray (local port + 1, "socks2"), see WithTunInboundTrusted.
-            buildConfig.Inbound.First().SecondLocalPortEnabled |= tun;
         }
         // Read fresh on every build — turning TUN on included: in TUN mode every DNS query of the system
         // goes to the core, so it must have the DNS of the network we are on right now.
@@ -62,10 +60,15 @@ public sealed class ProxyController
     /// <summary>
     /// TUN via sing-box runs two cores: sing-box routes the system traffic (it sees which application a
     /// connection belongs to) and hands what goes through the proxy to xray. xray used to route it again with
-    /// the same rules — but it cannot see the application (to xray every such connection comes from sing-box),
-    /// so per-application rules fell through to the last rule ("the rest direct"). Now sing-box connects to
-    /// a separate inbound of xray, and everything arriving there goes to the proxy: routed once, by sing-box.
-    /// It also keeps TUN traffic off the main local port, which another program may share (SO_REUSEPORT).
+    /// the same rules — but it cannot see the application (to xray every such connection comes from sing-box)
+    /// and recognizes fewer protocols (no QUIC), so such traffic fell through to "the rest direct".
+    /// Now routing is done once, by sing-box:
+    /// <list type="bullet">
+    /// <item>sing-box takes the local port (TUN and apps set to use the proxy both get its rules);</item>
+    /// <item>xray listens only on local port + 1 and sends everything it gets to the server.</item>
+    /// </list>
+    /// The engine gives the TUN core its own mixed inbound exactly when it does not point at the local port,
+    /// so only the port of xray and of the link between the two moves; second/LAN ports stay with sing-box.
     /// </summary>
     private static CoreConfigContextBuilderAllResult WithTunInboundTrusted(CoreConfigContextBuilderAllResult all)
     {
@@ -74,23 +77,38 @@ public sealed class ProxyController
         {
             return all;
         }
-        var node = JsonUtils.DeepCopy(pre.Context.Node)!;
-        node.Port = AppManager.Instance.GetLocalPort(EInboundProtocol.socks2);
+        var basePort = AppManager.Instance.GetLocalPort(EInboundProtocol.socks);
+        var xrayPort = basePort + (int)EInboundProtocol.socks2;
+
+        // xray: one inbound "socks" on base + 1, everything from it to the proxy.
+        var mainConfig = JsonUtils.DeepCopy(all.MainResult.Context.AppConfig)!;
+        var mainInbound = mainConfig.Inbound.First();
+        mainInbound.LocalPort = xrayPort;
+        mainInbound.SecondLocalPortEnabled = false;
+        mainInbound.AllowLANConn = false;
         var rules = JsonUtils.Deserialize<List<RulesItem>>(routing.RuleSet) ?? [];
         rules.Insert(0, new RulesItem
         {
             Id = Utils.GetGuid(false),
-            InboundTag = [nameof(EInboundProtocol.socks2)],
+            InboundTag = [nameof(EInboundProtocol.socks)],
             OutboundTag = Global.ProxyTag,
             Enabled = true,
             RuleType = ERuleType.Routing,
             Remarks = "v2rayn-tui: traffic from the TUN core is already routed",
         });
-        var copy = JsonUtils.DeepCopy(routing)!;
-        copy.RuleSet = JsonUtils.Serialize(rules, false);
+        var routingCopy = JsonUtils.DeepCopy(routing)!;
+        routingCopy.RuleSet = JsonUtils.Serialize(rules, false);
+
+        // sing-box: connects to xray's port; its own mixed inbound keeps the local port. Its second-port
+        // inbound would be base + 1 = xray's port, so that one is off.
+        var node = JsonUtils.DeepCopy(pre.Context.Node)!;
+        node.Port = xrayPort;
+        var preConfig = JsonUtils.DeepCopy(pre.Context.AppConfig)!;
+        preConfig.Inbound.First().SecondLocalPortEnabled = false;
+
         return new CoreConfigContextBuilderAllResult(
-            all.MainResult with { Context = all.MainResult.Context with { RoutingItem = copy } },
-            pre with { Context = pre.Context with { Node = node } });
+            all.MainResult with { Context = all.MainResult.Context with { RoutingItem = routingCopy, AppConfig = mainConfig } },
+            pre with { Context = pre.Context with { Node = node, AppConfig = preConfig } });
     }
 
     /// <summary>
@@ -679,7 +697,7 @@ public sealed class ProxyController
     public const string DefaultTunIPv4Address = "198.51.100.1/30";
 
     /// <summary>The TUN address in effect (setting, or <see cref="DefaultTunIPv4Address"/>).</summary>
-    public static string TunIPv4Address => Config.TunModeItem.IPv4Address.NullIfEmpty() ?? DefaultTunIPv4Address;
+    public static string TunIPv4Address => AppHost.Config?.TunModeItem?.IPv4Address.NullIfEmpty() ?? DefaultTunIPv4Address;
 
     /// <summary>The address belongs to our TUN subnet (its DNS server, gateway…).</summary>
     public static bool InTunSubnet(string ip) =>
