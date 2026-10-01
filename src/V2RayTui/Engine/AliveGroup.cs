@@ -200,8 +200,10 @@ public static class AliveGroup
         }
         var groupId = await EnsureAsync();
 
+        // Sources include members that are no longer in the subscriptions (tested themselves).
+        bool Source(ProfileItem p) => IsCandidate(p, groupId) || p.Subid == groupId;
         var qualified = sources
-            .Where(p => IsCandidate(p, groupId))
+            .Where(Source)
             .Select(p => (P: p, Delay: job.Delays.GetValueOrDefault(p.IndexId), Speed: job.Speeds.GetValueOrDefault(p.IndexId)))
             .Where(x => Qualifies(x.Delay, x.Speed))
             .Select(x => (x.P, x.Delay, x.Speed, Key: Key(x.P)))
@@ -232,12 +234,11 @@ public static class AliveGroup
         }
         var keys = qualified.Select(q => q.Key).ToHashSet();
         // A member that did not pass this time stays until it has failed enough checks in a row
-        // (AliveFailures, re-checked by the scheduler); one gone from the subscriptions leaves now.
-        var sourceKeys = sources.Where(p => IsCandidate(p, groupId)).Select(Key).ToHashSet();
+        // (AliveFailures, re-checked by the scheduler) — also when its server left the subscriptions.
         var kept = new List<ProfileItem>();
         foreach (var (key, copy) in existingByKey.Where(kv => !keys.Contains(kv.Key)))
         {
-            if (!sourceKeys.Contains(key) || AliveFailures.Count(key) >= S.AliveDropAfterFailures)
+            if (AliveFailures.Count(key) >= S.AliveDropAfterFailures)
             {
                 toRemove.Add(copy);
             }
@@ -352,7 +353,8 @@ public sealed class AliveSession
     private AliveSession(string groupId, IEnumerable<ProfileItem> sources)
     {
         _groupId = groupId;
-        _sources = sources.Where(p => AliveGroup.IsCandidate(p, groupId)).DistinctBy(p => p.IndexId).ToDictionary(p => p.IndexId);
+        // A member gone from the subscriptions is passed in itself and is its own source.
+        _sources = sources.Where(p => AliveGroup.IsCandidate(p, groupId) || p.Subid == groupId).DistinctBy(p => p.IndexId).ToDictionary(p => p.IndexId);
     }
 
     public int Count => _copies.Count;

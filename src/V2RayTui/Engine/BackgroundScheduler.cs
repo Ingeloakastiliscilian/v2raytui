@@ -273,6 +273,19 @@ public sealed class BackgroundScheduler
             var items = (await AppManager.Instance.ProfileItems(subId) ?? [])
                 .Where(p => aliveId == null || p.Subid != aliveId)
                 .ToList();
+            if (aliveId != null)
+            {
+                // Members whose server is no longer in any (tested) subscription are tested themselves:
+                // a live server stays in the group; it leaves only after failing like any other member.
+                var keys = items.Select(AliveGroup.Key).ToHashSet();
+                var orphans = (await AppManager.Instance.ProfileItems(aliveId) ?? []).Where(c => !keys.Contains(AliveGroup.Key(c))).ToList();
+                if (orphans.Count > 0)
+                {
+                    LogBus.Write("[alive] " + Loc.T($"{orphans.Count} member(s) not in the subscriptions — tested as they are",
+                        $"участников нет в подписках: {orphans.Count} — проверяются как есть"));
+                    items.AddRange(orphans);
+                }
+            }
             // Always include the active server, so auto switching knows whether it is alive.
             if (S.AutoSwitch != AutoSwitchMode.Off && items.All(p => p.IndexId != AppHost.Config.IndexId)
                 && await AppManager.Instance.GetProfileItem(AppHost.Config.IndexId) is { } active)
