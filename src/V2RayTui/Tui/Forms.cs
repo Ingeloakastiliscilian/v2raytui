@@ -440,10 +440,17 @@ internal static class SettingsDialogs
         var routeOnly = f.Check(L("Sniffing: route only", "Sniffing: только маршрутизация"), inbound.RouteOnly);
         var logLevel = f.Picker(L("Core log level", "Уровень лога ядра"), logLevels, Math.Max(0, logLevels.IndexOf(config.CoreBasicItem.Loglevel)));
         var tunSingBox = f.Check(L("TUN via sing-box (as v2rayN GUI ≤ 7.20)", "TUN через sing-box (как GUI v2rayN ≤ 7.20)"), AppHost.Settings.TunViaSingBox);
+        var tunAddr = f.Combo(L("TUN address (IPv4/30)", "Адрес TUN (IPv4/30)"), ProxyController.TunIPv4Address,
+            [ProxyController.DefaultTunIPv4Address, .. Global.TunIPv4Address]);
         var coreLog = f.Check(L("Write core access/error logs", "Писать логи ядра в файлы"), config.CoreBasicItem.LogEnabled);
         var except = f.Text(L("System proxy exceptions", "Исключения системного прокси"), config.SystemProxyItem.SystemProxyExceptions);
-        f.Note(L("The core also uses local port +1…+6 and +21 and up (tests). Next to v2rayN GUI use e.g. 10908.\n" +
+        f.Validate = () => tunAddr.Text.Trim() is var t && (t.IsNullOrEmpty() || System.Net.IPNetwork.TryParse(t, out _))
+            ? null
+            : L("TUN address: a CIDR, e.g. 198.51.100.1/30.", "Адрес TUN — CIDR, например 198.51.100.1/30.");
+        f.Note(L("TUN address: must not overlap networks in use (docker 172.17–31.x, VPNs, LAN); the default is a reserved range.\n" +
+                 "The core also uses local port +1…+6 and +21 and up (tests). Next to v2rayN GUI use e.g. 10908.\n" +
                  "Other v2rayN options live in guiConfigs/guiNConfig.json (edit while the TUI is closed).",
+                 "Адрес TUN не должен пересекаться с используемыми сетями (docker 172.17–31.x, VPN, LAN); по умолчанию — зарезервированный диапазон.\n" +
                  "Ядро занимает также порты локальный+1…+6 и от +21 (тесты). Рядом с GUI v2rayN берите, например, 10908.\n" +
                  "Остальные опции v2rayN — в guiConfigs/guiNConfig.json (редактируйте при закрытом TUI)."));
 
@@ -463,6 +470,8 @@ internal static class SettingsDialogs
         config.CoreBasicItem.Loglevel = logLevels[logLevel()];
         config.CoreBasicItem.LogEnabled = Form.Bool(coreLog);
         AppHost.Settings.TunViaSingBox = Form.Bool(tunSingBox);
+        var addr = tunAddr.Text.Trim();
+        config.TunModeItem.IPv4Address = addr.IsNullOrEmpty() || addr == ProxyController.DefaultTunIPv4Address ? null : addr;
         AppHost.SaveSettings();
         config.SystemProxyItem.SystemProxyExceptions = except.Text.Trim();
         AppManager.Instance.Reset();

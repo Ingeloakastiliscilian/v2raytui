@@ -274,7 +274,7 @@ public sealed class NetworkMonitor
         System.Net.IPAddress.TryParse(s, out var ip)
         && !System.Net.IPAddress.IsLoopback(ip)
         && !(ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && ip.IsIPv6LinkLocal) // needs a scope id
-        && !s.StartsWith("172.18.0."); // our sing-box TUN
+        && !ProxyController.InTunSubnet(s); // our own TUN's DNS
 
     private static string? Run(string file, string args)
     {

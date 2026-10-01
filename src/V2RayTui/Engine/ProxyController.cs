@@ -44,6 +44,7 @@ public sealed class ProxyController
     {
         var buildConfig = JsonUtils.DeepCopy(Config)!;
         buildConfig.TunModeItem.EnableTun = tun;
+        buildConfig.TunModeItem.IPv4Address = TunIPv4Address;
         if (AppHost.Settings.TunViaSingBox)
         {
             buildConfig.TunModeItem.EnableLegacyProtect = true;
@@ -670,6 +671,21 @@ public sealed class ProxyController
     /// v2rayN always names its TUN interface singbox_tun (and uses route table 2022): if it exists while
     /// our TUN is not running, another app (usually v2rayN GUI) owns it and a second TUN would break routing.
     /// </summary>
+    /// <summary>
+    /// Address of our TUN when the setting is empty. v2rayN's default 172.18.0.1/30 sits in the range docker
+    /// hands out (172.17–172.31) and collides with corporate VPN routes; TEST-NET-2 (RFC 5737) is reserved for
+    /// documentation and never used by real networks.
+    /// </summary>
+    public const string DefaultTunIPv4Address = "198.51.100.1/30";
+
+    /// <summary>The TUN address in effect (setting, or <see cref="DefaultTunIPv4Address"/>).</summary>
+    public static string TunIPv4Address => Config.TunModeItem.IPv4Address.NullIfEmpty() ?? DefaultTunIPv4Address;
+
+    /// <summary>The address belongs to our TUN subnet (its DNS server, gateway…).</summary>
+    public static bool InTunSubnet(string ip) =>
+        System.Net.IPNetwork.TryParse(TunIPv4Address, out var cidr) && System.Net.IPAddress.TryParse(ip, out var a)
+        && new System.Net.IPNetwork(cidr.BaseAddress, cidr.PrefixLength).Contains(a);
+
     public bool ForeignTunPresent() =>
         OperatingSystem.IsLinux() && Directory.Exists("/sys/class/net/singbox_tun") && !(TunActive && CoreRunning);
 
